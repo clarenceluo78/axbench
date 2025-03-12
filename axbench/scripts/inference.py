@@ -452,7 +452,7 @@ def infer_latent(args, rank, world_size, device, logger, training_args, generate
     model_instance = AutoModelForCausalLM.from_pretrained(
         args.model_name, 
         torch_dtype=torch.bfloat16 if args.use_bf16 else None, 
-        device_map="auto"
+        device_map=device
     )
     is_chat_model = True if args.model_name in CHAT_MODELS else False
     model_instance = model_instance.eval()
@@ -658,7 +658,7 @@ def infer_latent_imbalance(args, rank, world_size, device, logger, training_args
     model_instance = AutoModelForCausalLM.from_pretrained(
         args.model_name, 
         torch_dtype=torch.bfloat16 if args.use_bf16 else None, 
-        device_map="auto"
+        device_map=device
     )
     is_chat_model = True if args.model_name in CHAT_MODELS else False
     model_instance = model_instance.eval()
@@ -821,7 +821,7 @@ def infer_latent_on_train_data(args, rank, world_size, device, logger, training_
     model_instance = AutoModelForCausalLM.from_pretrained(
         args.model_name, 
         torch_dtype=torch.bfloat16 if args.use_bf16 else None, 
-        device_map="auto"
+        device_map=device
     )
     is_chat_model = True if args.model_name in CHAT_MODELS else False
     model_instance = model_instance.eval()
