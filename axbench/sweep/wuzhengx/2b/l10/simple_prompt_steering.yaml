@@ -2,16 +2,27 @@ generate:
   lm_model: "gpt-4o-mini"
   output_length: 128
   num_of_examples: 144
-  concept_path: "axbench/data/gemma-2-2b_10-featured-res-16k.json"
-  max_concepts: 500 # feature-description is much smaller than 500 as its original release.
+  concept_path: "axbench/data/gemma-2-2b_10-gemmascope-res-16k.json"
+  max_concepts: 500
   master_data_dir: "axbench/data"
   dataset_category: "instruction"
   lm_use_cache: false
   seed: 42
-  inference_batch_size: 16 # for generating DPO dataset.
+train:
+  model_name: "google/gemma-2-2b-it"
+  layer: 10
+  component: "res"
+  seed: 42
+  use_bf16: true
+  models:
+    DiffMean:
+      batch_size: 6
+      n_epochs: 1
+      binarize_dataset: true
+      low_rank_dimension: 1
 inference:
   use_bf16: true
-  models: ["PromptSteering"]
+  models: ["SimplePromptSteering"]
   model_name: "google/gemma-2-2b-it"
   # latent related params
   output_length: 128
@@ -32,3 +43,21 @@ inference:
   lm_model: "gpt-4o-mini"
   # generation related params
   temperature: 1.0
+evaluate:
+  models: ["SimplePromptSteering"]
+  latent_evaluators: [
+    "AUCROCEvaluator",
+    "HardNegativeEvaluator",
+  ]
+  steering_evaluators: [
+    "PerplexityEvaluator", 
+    "LMJudgeEvaluator",
+  ]
+  winrate_split_ratio: 0.5 # this is for steering only, we use a separate partition for factor selection.
+  # Number of processes to run in parallel for steering evaluation.
+  num_of_workers: 32
+  lm_model: "gpt-4o-mini"
+  run_winrate: false
+  winrate_baseline: "PromptSteering"
+  # master data dir is shared across all jobs.
+  master_data_dir: "axbench/data"

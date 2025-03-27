@@ -123,6 +123,12 @@ class PromptSteering(Model):
         return max_activations  
 
 
+class SimplePromptSteering(PromptSteering):
+    input_field = "simple_steered_input"
+    def __str__(self):
+        return 'SimplePromptSteering'
+
+
 class PromptDetection(Model):
     input_field = "output"
     concept_field = "output_concept"
