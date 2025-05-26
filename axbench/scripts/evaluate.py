@@ -321,29 +321,124 @@ def eval_steering(args):
     # Load previous state if exists
     state = load_state(args.dump_dir, mode=args.mode)
     start_concept_id = state.get("concept_id", 0) if state else 0
+    finish_stanza = state.get("stanza", False) if state else False
     logger.warning(f"Starting concept_id: {start_concept_id}")
 
-    # Create all evaluation tasks - flattened for maximum parallelization
+    if "PromptSteering" in args.models and args.defense is not None:
+        # Remove PromptSteering from the models list
+        args.models = [model for model in args.models if model != "PromptSteering"]
+        # Add PromptSteering_d for each defense method
+        if isinstance(args.defense, str):
+            defense_list = ast.literal_eval(args.defense)
+        else:
+            defense_list = args.defense
+        args.models.extend([f"PromptSteering_{d}" for d in defense_list])
+        print(args.models)
+        print("_"*100)
+
+    # Run all evaluations with process pool
+    logger.warning(f"Number of workers: {args.num_of_workers}; Number of CPUs: {multiprocessing.cpu_count()}")
+    if not hasattr(args, 'num_of_workers') or args.num_of_workers is None:
+        args.num_of_workers = max(1, multiprocessing.cpu_count() - 1)
+
+    lm_reports = []
+    eval_dfs = {}
+    all_results = {}
+    lm_caches = {}
+    ### accomodate for rule special cases that need stanza
+    temp_results_path = os.path.join(dump_dir, f"temp_all_results.pkl")
+    temp_dfs_path = os.path.join(dump_dir, f"temp_eval_dfs.pkl")
+    # print("finish stanza", finish_stanza)
+    if not finish_stanza:
+        # Create all evaluation tasks - flattened for maximum parallelization
+        df_generator = data_generator(
+            args.data_dir, mode=args.mode, 
+            winrate_split_ratio=args.winrate_split_ratio)
+
+        all_tasks_rule_special = [
+            (concept_id, current_df, evaluator_name, model_name, args.dump_dir, \
+            args.lm_model, args.winrate_baseline, { }, args.steer_data_type)
+            for concept_id, current_df in df_generator
+            if concept_id >= start_concept_id
+            for evaluator_name in args.steering_evaluators
+            for model_name in args.models
+            if model_name not in STEERING_EXCLUDE_MODELS
+            if ("Rule" in evaluator_name and current_df['input_concept'].iloc[0] in NEED_STANZA)
+        ]
+
+        for task in all_tasks_rule_special:
+            concept_id, evaluator_str, model_str, result, lm_report, lm_cache, current_df = eval_steering_single_task(task)
+
+            if concept_id not in all_results:
+                all_results[concept_id] = {}
+                eval_dfs[concept_id] = {}
+
+            if evaluator_str not in all_results[concept_id]:
+                all_results[concept_id][evaluator_str] = {}
+                eval_dfs[concept_id][evaluator_str] = {}
+
+            all_results[concept_id][evaluator_str][model_str] = result
+
+            if ("raw_relevance_concept_ratings" in result or
+                "raw_relevance_instruction_ratings" in result or
+                "raw_fluency_ratings" in result or
+                "raw_aggregated_ratings" in result) and evaluator_str == "LMJudgeEvaluator":
+                current_df[f"{model_str}_{evaluator_str}_relevance_concept_ratings"] = result["raw_relevance_concept_ratings"]
+                current_df[f"{model_str}_{evaluator_str}_relevance_instruction_ratings"] = result["raw_relevance_instruction_ratings"]
+                current_df[f"{model_str}_{evaluator_str}_fluency_ratings"] = result["raw_fluency_ratings"]
+                current_df[f"{model_str}_{evaluator_str}"] = result["raw_aggregated_ratings"]
+                current_df[f"{model_str}_{evaluator_str}_relevance_concept_completions"] = result["relevance_concept_completions"]
+                current_df[f"{model_str}_{evaluator_str}_relevance_instruction_completions"] = result["relevance_instruction_completions"]
+                current_df[f"{model_str}_{evaluator_str}_fluency_completions"] = result["fluency_completions"]
+
+                eval_dfs[concept_id][evaluator_str][model_str] = current_df.copy()
+
+            if "rule_following" in result and evaluator_str == "RuleEvaluator" and args.mode != "train_data":
+                current_df[f"{model_str}_{evaluator_str}_rule_following"] = result["raw_rule_following"]
+                eval_dfs[concept_id][evaluator_str][model_str] = current_df.copy()
+            
+            elif "rule_following" in result and evaluator_str == "RuleEvaluator" and args.mode == "train_data":
+                current_df[f"{evaluator_str}_rule_following_winning"] = result["raw_rule_following_winning"]
+                current_df[f"{evaluator_str}_rule_following_losing"] = result["raw_rule_following_losing"]
+                eval_dfs[concept_id][evaluator_str][model_str] = current_df.copy()
+
+            lm_reports.append(lm_report)
+            lm_caches.update(lm_cache)
+            
+            logger.warning(f"Completed task for concept_id: {concept_id}, model: {model_str}, evaluator: {evaluator_str}")
+        
+        with open(temp_results_path, "wb") as f:
+            pickle.dump(all_results, f)
+        with open(temp_dfs_path, "wb") as f:
+            pickle.dump(eval_dfs, f)
+
+        # Save state
+        state_path = os.path.join(args.dump_dir, f"{args.mode}_{STATE_FILE}") 
+        with open(state_path, "wb") as f:
+            pickle.dump({"concept_id": 0, "stanza": True}, f)
+
+
+    if os.path.exists(temp_results_path):
+        with open(temp_results_path, "rb") as f:
+            print("loading temp results")
+            all_results = pickle.load(f)
+            
+    if os.path.exists(temp_dfs_path):
+        with open(temp_dfs_path, "rb") as f:
+            print("loading temp dfs")
+            eval_dfs = pickle.load(f)
+
     all_tasks = [
         (concept_id, current_df, evaluator_name, model_name, args.dump_dir, \
-         args.lm_model, args.winrate_baseline, {})
+         args.lm_model, args.winrate_baseline, { }, args.steer_data_type)
         for concept_id, current_df in df_generator
         if concept_id >= start_concept_id
         for evaluator_name in args.steering_evaluators
         for model_name in args.models
         if model_name not in STEERING_EXCLUDE_MODELS
+        if not("Rule" in evaluator_name and current_df['input_concept'].iloc[0] in NEED_STANZA)
     ]
 
-    # Group results by concept_id
-    all_results = {}
-    
-    # Run all evaluations with process pool
-    logger.warning(f"Number of workers: {args.num_of_workers}; Number of CPUs: {multiprocessing.cpu_count()}")
-    if not hasattr(args, 'num_of_workers') or args.num_of_workers is None:
-        args.num_of_workers = max(1, multiprocessing.cpu_count() - 1)
-    lm_reports = []
-    eval_dfs = {}
-    lm_caches = {}
     with ProcessPoolExecutor(max_workers=args.num_of_workers) as executor:
         for concept_id, evaluator_str, model_str, result, lm_report, lm_cache, current_df in executor.map(
             eval_steering_single_task, all_tasks):
@@ -354,41 +449,49 @@ def eval_steering(args):
                 all_results[concept_id][evaluator_str] = {}
                 eval_dfs[concept_id][evaluator_str] = {}
             all_results[concept_id][evaluator_str][model_str] = result
-            if "raw_relevance_concept_ratings" in result or \
+            if ("raw_relevance_concept_ratings" in result or \
                 "raw_relevance_instruction_ratings" in result or \
                 "raw_fluency_ratings" in result or \
-                "raw_aggregated_ratings" in result:
+                "raw_aggregated_ratings" in result) and evaluator_str == "LMJudgeEvaluator":
                 current_df[f"{model_str}_{evaluator_str}_relevance_concept_ratings"] = result["raw_relevance_concept_ratings"]
                 current_df[f"{model_str}_{evaluator_str}_relevance_instruction_ratings"] = result["raw_relevance_instruction_ratings"]
                 current_df[f"{model_str}_{evaluator_str}_fluency_ratings"] = result["raw_fluency_ratings"]
                 current_df[f"{model_str}_{evaluator_str}"] = result["raw_aggregated_ratings"]
                 current_df[f"{model_str}_{evaluator_str}_relevance_concept_completions"] = result["relevance_concept_completions"]
                 current_df[f"{model_str}_{evaluator_str}_relevance_instruction_completions"] = result["relevance_instruction_completions"]
-                current_df[f"{model_str}_{evaluator_str}_fluency_completions"] = result["fluency_completions"]
+                current_df[f"{model_str}_{evaluator_str}_fluency_completions"] = result["fluency_completions"]              
                 eval_dfs[concept_id][evaluator_str][model_str] = current_df.copy()
+
+            if "rule_following" in result and evaluator_str == "RuleEvaluator" and args.mode != "train_data":
+                current_df[f"{model_str}_{evaluator_str}_rule_following"] = result["raw_rule_following"]
+                eval_dfs[concept_id][evaluator_str][model_str] = current_df.copy()
+
+            elif "rule_following" in result and evaluator_str == "RuleEvaluator" and args.mode == "train_data":
+                current_df[f"{evaluator_str}_rule_following_winning"] = result["raw_rule_following_winning"]
+                current_df[f"{evaluator_str}_rule_following_losing"] = result["raw_rule_following_losing"]
+                eval_dfs[concept_id][evaluator_str][model_str] = current_df.copy()
+            
             lm_reports += [lm_report]
             lm_caches.update(lm_cache)
             logger.warning(f"Completed task for concept_id: {concept_id}, model: {model_str}, evaluator: {evaluator_str}")
 
-    # Batch save all results
     for concept_id, eval_results in sorted(all_results.items()):
         save_results(
             dump_dir, 
-            {"concept_id": concept_id + 1}, 
+            {"concept_id": concept_id+1, "stanza": True}, 
             concept_id, 
             args.mode, 
             eval_results, 
             eval_dfs[concept_id]
         )
         
-    # Reload for plotting and optional winrate
-    try:
-        aggregated_results = process_jsonl_file(
-            load_jsonl(os.path.join(Path(dump_dir) / "evaluate" / f'{args.mode}.jsonl')))
-    except Exception as e:
-        logger.warning(f"Failed to load {args.mode}.jsonl: {e}. Aborting evaluation.")
+    if args.mode == "train_data":
         return
-
+    # Reload for plotting and optional winrate
+    
+    aggregated_results = process_jsonl_file(
+        load_jsonl(os.path.join(dump_dir / f'{args.mode}.jsonl')))
+   
     # Aggregate LM reports
     aggregated_lm_report = {
         "total_calls": sum([report["total_calls"] for report in lm_reports]),
@@ -403,7 +506,9 @@ def eval_steering(args):
 
     # Generate final plot
     logger.warning("Generating final plot...")
-    plot_steering(aggregated_results, Path(dump_dir) / "evaluate", args.report_to, args.wandb_name, args.mode)
+    plot_steering(aggregated_results, dump_dir, args.report_to, args.wandb_name, args.mode)
+    plot_metrics_multiple_datasets(os.path.join(dump_dir, "steering_data.parquet"), dump_dir, args.report_to, args.wandb_name, args.mode, rule = args.steer_data_type=="rule")
+    #plot_metrics_multiple_datasets(os.path.join(dump_dir, "steering_data.parquet"), dump_dir, args.report_to, args.wandb_name, args.mode, rule = args.steer_data_type=="rule")
     logger.warning("Evaluation completed!")
 
 

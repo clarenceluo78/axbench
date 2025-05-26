@@ -367,15 +367,28 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
                 low_rank_dimension=len(metadata),
                 device=device, steering_layers=steering_layers,
             )
+            if model_name in {"PromptSteering", "GemmaScopeSAE"}:
+                lr = 1
+            else:
+                lr = training_args.models[model_name].low_rank_dimension if training_args.models[model_name].low_rank_dimension else 1
             benchmark_model.load(
-                dump_dir=train_dir, sae_path=metadata[0]["ref"], mode="steering",
+                dump_dir=train_dir, sae_path=metadata[0]["ref"], 
+                mode="steering",
+                priority_mode=priority_mode,
                 intervention_type=args.steering_intervention_type,
-                concept_id=concept_id
+                concept_id=concept_id,
+                low_rank_dimension=lr
             )
             benchmark_model.to(device)
             if hasattr(benchmark_model, 'ax') and args.use_bf16:
-                benchmark_model.ax.eval()
-                benchmark_model.ax.to(torch.bfloat16)
+                if model_name not in {"PreferenceLoReFT", "ConceptLoReFT",}:
+                    if isinstance(benchmark_model.ax, list):
+                        for ax in benchmark_model.ax:
+                            ax.eval()
+                        ax.to(torch.bfloat16)
+                    else:
+                        benchmark_model.ax.eval()
+                        benchmark_model.ax.to(torch.bfloat16)
             # Pre-compute mean activations once
             if model_name not in {"LoReFT", "BoW"} and model_name not in LATENT_EXCLUDE_MODELS:
                 benchmark_model.pre_compute_mean_activations(
@@ -387,14 +400,15 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
             logger.warning(f"Inference steering with {model_name} on {device} for concept {concept_id}.")
             # Run prediction
             results = benchmark_model.predict_steer(
-                current_df, concept_id=concept_id, sae_link=sae_link, sae_id=sae_id,
-                batch_size=args.steering_batch_size,
-                eval_output_length=args.steering_output_length, 
-                temperature=args.temperature,
+                current_df, concept_id=unique_concept_ids[0] if len(unique_concept_ids) == 1 else unique_concept_ids, sae_link=None, sae_id=None,
+                batch_size=int(args.steering_batch_size),
+                eval_output_length=int(args.steering_output_length), 
+                temperature=float(args.temperature),
                 prefix_length=prefix_length,
                 positions=training_args.models[model_name].intervention_positions if model_name not in {"PromptSteering", "GemmaScopeSAE"} else None,
-                use_synergy=training_args.models[model_name].use_synergy if model_name in {"LsReFT"} else False,
+                use_synergy=False,
                 disable_neuronpedia_max_act=args.disable_neuronpedia_max_act,
+                intervene_on_prompt=args.intervene_on_prompt if args.intervene_on_prompt is not None else True,
             )
             # Store the results in current_df
             for k, v in results.items():
