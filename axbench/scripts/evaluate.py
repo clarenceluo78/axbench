@@ -210,12 +210,13 @@ def process_jsonl_file(jsonl_lines):
 def plot_steering(aggregated_results, dump_dir, report_to=[], wandb_name=None, mode=None):
     try:
         configs = [
-            {
-                'evaluator_name': 'PerplexityEvaluator',
-                'metric_name': 'perplexity',
-                'y_label': 'Perplexity',
-                'use_log_scale': False
-            },
+            # We dont explicity plot ppl anymore to save memory.
+            # {
+            #     'evaluator_name': 'PerplexityEvaluator',
+            #     'metric_name': 'perplexity',
+            #     'y_label': 'Perplexity',
+            #     'use_log_scale': False
+            # },
             {
                 'evaluator_name': 'LMJudgeEvaluator',
                 'metric_name': 'relevance_concept_ratings',

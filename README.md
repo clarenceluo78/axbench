@@ -19,8 +19,8 @@ We introduced **supervised dictionary learning** (SDL) on synthetic data as an a
 
 ## 🔥 New releases
 
-- 05/25: Multiple new steering evaluations on feature suppression is added.
-- 05/25: New steering method RePS is added from the paper [improved representation steering for language models](link-goes-here).
+- 05/25: Steering eval on feature suppression / many-shot jailbreaking are added.
+- 05/25: New steering method RePS from [improved representation steering for language models](link-goes-here).
 
 
 ## 🎯 Highlights
