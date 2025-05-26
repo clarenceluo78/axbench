@@ -154,7 +154,10 @@ def create_data_steering(
     # prepare concept related data.
     concept = metadata[concept_id]["concept"]
     sae_link = metadata[concept_id]["ref"]
-    sae_id = int(sae_link.split("/")[-1]) 
+    try:
+        sae_id = int(sae_link.split("/")[-1]) 
+    except:
+        sae_id = 0
 
     current_df = dataset_factory.create_eval_df(
         [concept], num_of_examples, n_steering_factors, steering_datasets, concept_id=concept_id,
@@ -224,6 +227,54 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
             pass
 
     if len(my_concept_ids) == 0:
+
+        # Synchronize all processes
+        dist.barrier()
+
+        # Rank 0 merges results
+        if rank == 0:
+            logger.warning("Rank 0 is merging results.")
+            # Merge per-rank results
+            all_parquet_files = list((overwrite_inference_dump_dir).glob("rank_*_steering_data.parquet"))
+            # Parse filenames to extract rank
+            import re
+            pattern = re.compile(r'rank_(\d+)_steering_data\.parquet')
+
+            file_info_list = []
+            for parquet_file in all_parquet_files:
+                match = pattern.match(parquet_file.name)
+                if match:
+                    rank_str = match.group(1)
+                    rank_int = int(rank_str)
+                    file_info_list.append({
+                        'rank': rank_int,
+                        'file': parquet_file
+                    })
+                else:
+                    logger.warning(f"Filename {parquet_file.name} does not match the expected pattern.")
+
+            # Sort the file_info_list by rank
+            file_info_list.sort(key=lambda x: x['rank'])
+
+            # Read and concatenate dataframes
+            dfs = []
+            for info in file_info_list:
+                df = pd.read_parquet(info['file'])
+                dfs.append(df)
+            if len(dfs) > 0:
+                combined_df = pd.concat(dfs, ignore_index=True)
+                # Optionally sort combined_df by 'concept_id' if needed
+                combined_df = combined_df.sort_values(by=['concept_id', 'input_id', 'factor']).reset_index(drop=True)
+                combined_df.to_parquet(overwrite_inference_dump_dir / "steering_data.parquet", engine='pyarrow')
+                logger.warning(f"Saved combined steering inference results to {overwrite_inference_dump_dir / 'steering_data.parquet'}")
+            else:
+                logger.warning("No results to merge.")
+
+            # Optionally, delete per-rank files
+            for info in file_info_list:
+                os.remove(info['file'])
+                logger.warning(f"Deleted {info['file']}")
+
         logger.warning(f"Rank {rank} has no concepts to process. Exiting.")
         return
 
@@ -242,8 +293,12 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
     )
 
     # Initialize the dataset factory with the tokenizer.
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.steering_model_name, use_fast=False, model_max_length=1024)
+    if "google/gemma-3" in args.steering_model_name:
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.steering_model_name, use_fast=False, model_max_length=128000)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.steering_model_name, use_fast=False, model_max_length=1024)
     tokenizer.padding_side = "right"
     if "PromptSteering" in args.models:
         has_prompt_steering = True
@@ -267,10 +322,15 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
     # Load model instance onto device
     if args.use_bf16:
         logger.warning(f"Using bfloat16 for model {args.model_name}")
-    model_instance = AutoModelForCausalLM.from_pretrained(
-        args.steering_model_name if args.steering_model_name else args.model_name, 
-        torch_dtype=torch.bfloat16 if args.use_bf16 else None, device_map=device
-    )
+    if "gemma-3" in args.model_name:
+        from transformers import Gemma3ForCausalLM
+        model_instance = Gemma3ForCausalLM.from_pretrained(
+            args.model_name, torch_dtype=torch.bfloat16 if args.use_bf16 else None, device_map=device)
+    else:
+        model_instance = AutoModelForCausalLM.from_pretrained(
+            args.steering_model_name if args.steering_model_name else args.model_name, 
+            torch_dtype=torch.bfloat16 if args.use_bf16 else None, device_map=device
+        )
     model_instance = model_instance.eval()
 
     if tokenizer.unk_token == None and tokenizer.pad_token == None:

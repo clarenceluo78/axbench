@@ -40,7 +40,7 @@ STATE_FILE = "train_state.pkl"
 METADATA_FILE = "metadata.jsonl"
 
 
-def data_generator(data_dir):
+def data_generator(data_dir, use_dpo_loss=False):
     """
     Generator function to read multiple data files and yield data subsets by concept_id.
     Processes files in order: train_data.parquet, train_data_0.parquet, train_data_1.parquet, etc.
@@ -52,16 +52,27 @@ def data_generator(data_dir):
         (concept_id, df_subset): A tuple containing the concept_id and subset DataFrame.
     """
     # Gather all file paths in the directory
-    file_paths = [os.path.join(data_dir, f) for f in os.listdir(data_dir) \
-        if f.startswith('train_data') and f.endswith('.parquet') and "combined" not in f]
+    if use_dpo_loss:
+        file_paths = [os.path.join(data_dir, f) for f in os.listdir(data_dir) \
+            if f.startswith('dpo_train_data') and f.endswith('.parquet') and "combined" not in f]
+    else:
+        file_paths = [os.path.join(data_dir, f) for f in os.listdir(data_dir) \
+            if f.startswith('train_data') and f.endswith('.parquet') and "combined" not in f]
 
     # Sort files: 'train_data.parquet' comes first, then 'train_data_X.parquet' sorted by X
     def extract_index(file_name):
-        if file_name == 'train_data.parquet':
-            return -1  # Ensure 'train_data.parquet' comes first
+        if use_dpo_loss:
+            if file_name == 'dpo_train_data.parquet':
+                return -1  # Ensure 'train_data.parquet' comes first
+            else:
+                # Extract the number X from 'train_data_X.parquet'
+                return int(file_name.split('_')[-1].split('.')[0])
         else:
-            # Extract the number X from 'train_data_X.parquet'
-            return int(file_name.split('_')[-1].split('.')[0])
+            if file_name == 'train_data.parquet':
+                return -1  # Ensure 'train_data.parquet' comes first
+            else:
+                # Extract the number X from 'train_data_X.parquet'
+                return int(file_name.split('_')[-1].split('.')[0])
 
     file_paths.sort(key=lambda x: extract_index(os.path.basename(x)))
 
@@ -89,8 +100,11 @@ def load_metadata(metadata_path):
 
 
 def prepare_df(
-        original_df, negative_df, concept, metadata, tokenizer, 
-        binarize, train_on_negative, is_chat_model, output_length, model_name, max_num_of_examples=None):
+    original_df, negative_df, concept, metadata, tokenizer, 
+    binarize, train_on_negative, is_chat_model, output_length, model_name, 
+    max_num_of_examples=None, use_dpo_loss=False, steering_prompt_type="prepend",
+    keep_orig_axbench_format=False):
+    
     suffix_length, suffix_str = get_suffix_length(tokenizer)
     print(f"Suffix length for {model_name}: {suffix_length}, Suffix string: {suffix_str}")
     genre = metadata["concept_genres_map"][concept][0]
@@ -102,7 +116,7 @@ def prepare_df(
         negative_df = negative_df.head(max_num_of_examples // 2)
     if binarize:
         if is_chat_model:
-            if model_name == "meta-llama/Llama-3.1-8B-Instruct":
+            if model_name in HAS_SYSTEM_PROMPT_MODELS:
                 def apply_chat_template(row):
                     messages = [
                         {"role": "system", "content": "You are a helpful assistant."}, 
@@ -141,34 +155,50 @@ def prepare_df(
         return pd.concat([positive_df, negative_df], axis=0)
     else:
         # if not binarizing, we need to apply the chat template to the input. It becomes a standard instruction tuning task.
-        if train_on_negative:
+        if not use_dpo_loss and train_on_negative:
             all_df = pd.concat([positive_df, negative_df], axis=0)
         else:
+            # for DPO, we only use positive examples.
             all_df = positive_df
         if is_chat_model:
-            if model_name == "meta-llama/Llama-3.1-8B-Instruct":
-                def apply_chat_template(row):
-                    messages = [
-                        {"role": "system", "content": "You are a helpful assistant."}, 
-                        {"role": "user", "content": row["input"]},
-                    ]
+            system_messages = []
+            if model_name in HAS_SYSTEM_PROMPT_MODELS:
+                system_messages = [{"role": "system", "content": "You are a helpful assistant."}]
+            
+            def apply_chat_template(df, column_name):
+                def template_function(row):
+                    messages = system_messages + [{"role": "user", "content": row[column_name]}]
                     nobos = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True)[1:]
                     return tokenizer.decode(nobos)
-                all_df['input'] = all_df.apply(apply_chat_template, axis=1)
+                df[column_name] = df.apply(template_function, axis=1)
 
-                # handling output separately.
-                def apply_chat_template_for_output(row):
-                    if len(tokenizer.tokenize(row["output"])) < output_length:
-                        return row["output"] + suffix_str
-                    else:
-                        return row["output"]
-                all_df['output'] = all_df.apply(apply_chat_template_for_output, axis=1)
-            else:
-                def apply_chat_template(row):
-                    messages = [{"role": "user", "content": row["input"]}]
-                    nobos = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True)[1:]
-                    return tokenizer.decode(nobos)
-                all_df['input'] = all_df.apply(apply_chat_template, axis=1)
+            apply_chat_template(all_df, "input")
+            if use_dpo_loss:
+                if f"{steering_prompt_type}_steered_input" in all_df.columns:
+                    apply_chat_template(all_df, f"{steering_prompt_type}_steered_input")
+
+            # Add EOS prefix tokens by default. The truncation at data collator will take care of the rest.
+            def apply_output_template(df, column_name):
+                def template_function(row):
+                    return row[column_name] + suffix_str
+                df[column_name] = df.apply(template_function, axis=1)
+            
+            # AxBench has much shorter outputs. We follow the original AxBench format.
+            if not keep_orig_axbench_format:
+                # Apply the template to all output columns
+                for column in ["output", "winning_output", "losing_output", "prepend_steered_output", "blend_in_steered_output"]:
+                    if column in all_df.columns:
+                        apply_output_template(all_df, column)
+
+            # Print sample row data
+            print("\n=== Sample Row Data ===")
+            sample_row = all_df.iloc[0]
+            for column in sample_row.index:
+                print(f"\n{column}:")
+                print("-" * (len(column) + 1))
+                print(f"{sample_row[column]}")
+            print("=====================\n")
+
         return all_df # do nothing, the task will be standard instruction tuning.
 
 
@@ -335,12 +365,13 @@ def main():
                 model_instance, tokenizer, layer=args.layer,
                 training_args=args.models[model_name],
                 lm_model_name=args.model_name,
-                device=device, seed=args.seed, 
+                device=device, seed=args.seed, use_wandb=args.use_wandb
             )
             low_rank_dimension = args.models[model_name].low_rank_dimension \
                 if args.models[model_name].low_rank_dimension else 1
             benchmark_model.make_model(
                 mode="train",
+                embed_dim=model_instance.config.hidden_size,
                 low_rank_dimension=low_rank_dimension,
                 dtype=torch.bfloat16 if args.use_bf16 else None,
                 intervention_type=args.models[model_name].intervention_type,
@@ -348,25 +379,47 @@ def main():
                 sae_params=sae_params,
                 metadata_path=metadata_path,
                 dump_dir=dump_dir,
-                model_params=args.models[model_name]
+                model_params=args.models[model_name],
+                dropout=args.models[model_name].dropout,
+                intervention_positions_dropout=args.models[model_name].intervention_positions_dropout,
+                preference_pairs=args.models[model_name].preference_pairs,
             )
-            if model_name not in {"LoReFT", "LoRA", "SFT", "BoW"} and args.use_bf16:
-                benchmark_model.ax.to(torch.bfloat16)
+            if model_name not in {"LoReFT", "LoRA", "SFT", "BoW", "PreferenceLoReFT", "ConceptLoReFT"} and args.use_bf16:
+                if isinstance(benchmark_model.ax, list):
+                    for ax in benchmark_model.ax:
+                        ax.to(torch.bfloat16)
+                else:
+                    benchmark_model.ax.to(torch.bfloat16)
             kwargs = {
                 "prefix_length": prefix_length,
                 "positions": args.models[model_name].intervention_positions,
                 "exclude_bos": args.models[model_name].exclude_bos,
                 "metadata_path": metadata_path,
+                "use_dpo_loss": args.use_dpo_loss,
+                "logging_metadata": {
+                    "concept_id": concept_id,
+                    "model_name": model_name,
+                    "layer": args.layer,
+                },
+                "wandb_project": args.wandb_project,
+                "wandb_name": args.wandb_name,
+                "negative_only": args.models[model_name].negative_only,
+                "preference_pairs": args.models[model_name].preference_pairs,
+                "steering_prompt_type": args.models[model_name].steering_prompt_type,
+                "substraction_type": args.models[model_name].substraction_type,
             }
             prepared_df = concept_df.copy()
             prepared_df = prepare_df(
                 prepared_df, negative_df, concept, metadata[concept_id], tokenizer, 
                 binarize=args.models[model_name].binarize_dataset, 
                 train_on_negative=args.models[model_name].train_on_negative,
+                use_dpo_loss=args.use_dpo_loss,
                 is_chat_model=is_chat_model,
-                output_length=generate_args.output_length,
+                output_length=int(args.output_length),
                 model_name=args.model_name,
                 max_num_of_examples=args.max_num_of_examples,
+                steering_prompt_type=args.models[model_name].steering_prompt_type,
+                keep_orig_axbench_format=generate_args.keep_orig_axbench_format,
             )
             benchmark_model.train(prepared_df, **kwargs)
             benchmark_model.save(dump_dir, model_name=f"rank_{rank}_{model_name}")

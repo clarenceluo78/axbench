@@ -17,6 +17,12 @@ We introduced **supervised dictionary learning** (SDL) on synthetic data as an a
 - 🔍 **Subspace Gazer**: [**Visualize Subspaces via UMAP**](https://nlp.stanford.edu/~wuzhengx/axbench/visualization_UMAP.html)
 - [<img align="center" src="https://colab.research.google.com/assets/colab-badge.svg" />](https://colab.research.google.com/github/stanfordnlp/axbench/blob/main/axbench/examples/tutorial.ipynb) **Tutorial of using our dictionary via [pyvene](https://github.com/stanfordnlp/pyvene)**
 
+## Releases
+
+- 05/25: multiple new steering evaluations on feature suppression is added.
+- 05/25: new steering method is added from the paper [improved representation steering for language models](link-goes-here).
+
+
 ## 🎯 Highlights
 
 1. **Scalabale evaluation harness**: Framework for generating synthetic training + eval data from concept lists (e.g. GemmaScope SAE labels).

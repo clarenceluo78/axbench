@@ -216,7 +216,10 @@ def create_data_latent(dataset_factory, metadata, concept_id, num_of_examples, a
     # prepare concept related data.
     concept = metadata[concept_id]["concept"]
     sae_link = metadata[concept_id]["ref"]
-    sae_id = int(sae_link.split("/")[-1]) 
+    try:
+        sae_id = int(sae_link.split("/")[-1]) 
+    except:
+        sae_id = 0
     concept_genres_map = metadata[concept_id]["concept_genres_map"]
     _, eval_contrast_concepts_map = \
         dataset_factory.prepare_concepts(
@@ -225,8 +228,8 @@ def create_data_latent(dataset_factory, metadata, concept_id, num_of_examples, a
             contrast_concepts_map={}, api_tag="inference")
     current_df = dataset_factory.create_eval_df(
         [concept], num_of_examples, concept_genres_map, {},
-        eval_contrast_concepts_map, input_length=args.input_length, 
-        output_length=args.output_length
+        eval_contrast_concepts_map, input_length=int(args.input_length), 
+        output_length=int(args.output_length), seed=int(args.seed)
     )
     current_df["concept_id"] = concept_id
     current_df["sae_link"] = sae_link
@@ -465,7 +468,6 @@ def save_dpo(
     dump_dir, concept_id, partition,
     current_df):
     # This function saves DataFrames per rank per partition (latent or steering)
-    dump_dir = Path(dump_dir) / "generate"
     dump_dir.mkdir(parents=True, exist_ok=True)
     
     # Save DataFrame using Parquet
@@ -484,7 +486,6 @@ def save_dpo(
 
 
 def save_state_dpo(dump_dir, state, partition):
-    dump_dir = Path(dump_dir) / "generate"
     dump_dir.mkdir(parents=True, exist_ok=True)
     # Save state
     state_path = os.path.join(dump_dir, f"{partition}_{STATE_FILE}")
@@ -492,9 +493,21 @@ def save_state_dpo(dump_dir, state, partition):
         pickle.dump(state, f)
 
 
-def generate_dpo_training(args, generate_args):
+def load_state_dpo(dump_dir, partition):
+    """
+    Load the state from a file if it exists.
+    """
+    state_path = os.path.join(f"{dump_dir}/generate", f"{partition}_{STATE_FILE}")
+    if os.path.exists(state_path):
+        with open(state_path, "rb") as f:
+            return pickle.load(f)
+    return None
+
+
+def generate_dpo_training(args, inference_args):
     dump_dir = args.dump_dir
     dump_dir = Path(dump_dir) / "generate"
+    args.data_dir = f"{args.dump_dir}/generate"
     # check the generate directory exists.
     if not os.path.exists(dump_dir):
         raise ValueError(f"Generate directory does not exist: {dump_dir}")
@@ -507,55 +520,68 @@ def generate_dpo_training(args, generate_args):
     max_concepts = args.max_concepts
 
     # Load and optionally shuffle concepts
-    set_seed(args.seed)
-    all_concepts, all_refs = load_concepts(concept_path)
-    
-    # Limit the number of concepts if specified
-    if max_concepts is not None:
-        combined = list(zip(all_concepts, all_refs))
-        random.shuffle(combined)
-        all_concepts, all_refs = zip(*combined)
-        all_concepts = list(all_concepts)[:max_concepts]
-        all_refs = list(all_refs)[:max_concepts]
-    
-    concept2id = {concept: i for i, concept in enumerate(all_concepts)}
-    concepts = list(zip(all_concepts, all_refs))
+    set_seed(int(args.seed))
 
+    # Configure the logger per rank
+    logger.setLevel(logging.WARNING)  # Set the logging level as desired
+
+    # Create a logging formatter that includes the rank
+    formatter = logging.Formatter(
+        fmt=f'%(asctime)s,%(msecs)03d %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s',
+        datefmt='%Y-%m-%d:%H:%M:%S'
+    )
+
+    # Create a console handler and set its formatter
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+
+    # Add the handler to the logger
+    if not logger.handlers:
+        logger.addHandler(console_handler)
+
+    # Optionally, create a file handler per rank
+    """
+    log_file = f'log_rank_{rank}.log'
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    """
+    data_dir = args.data_dir
+    num_of_examples = args.latent_num_of_examples
+    metadata = load_metadata_flatten(data_dir)
+    # Get list of all concept_ids
+    concept_ids = list(range(len(metadata)))
+    concepts = [metadata[i]["concept"] for i in concept_ids]
+    
     # Load the state if it exists.
-    state = load_state_latent(dump_dir, "dpo")
+    state = load_state_dpo(args.dump_dir, "dpo")
     start_concept_id = state.get("concept_id", 0) if state else 0
     logger.warning(f"Starting concept index: {start_concept_id}")
-    if start_concept_id >= len(concepts):
+    if start_concept_id >= len(concept_ids):
         logger.warning(f"Datasets for all concepts have been generated. Exiting.")
         return
 
-    # Load lm and tokenizer.
-    model_name = model_name_map[all_refs[0].split("/")[3]]
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name, torch_dtype=torch.bfloat16)
-    is_chat_model = True if model_name in CHAT_MODELS else False
-    include_system_prompt = True if model_name == "meta-llama/Llama-3.1-8B-Instruct" else False
-    model = model.cuda()
-
-    tokenizer =  AutoTokenizer.from_pretrained(model_name, model_max_length=512)
-    tokenizer.padding_side = "right"
-
-    if tokenizer.unk_token == None and tokenizer.pad_token == None:
-        # raw llama3
-        print("adding a special padding token...")
-        tokenizer.add_special_tokens({'pad_token': '[PAD]'})
-        need_resize = True
-    else:
-        need_resize = False
-    if need_resize:
-        model.resize_token_embeddings(len(tokenizer))
+    # Create a new OpenAI client.
+    client = AsyncOpenAI(
+        api_key=os.environ.get("OPENAI_API_KEY"),
+        timeout=60.0,
+        http_client=httpx.AsyncClient(
+            limits=httpx.Limits(
+                max_keepalive_connections=100, 
+                max_connections=1000
+            ),
+            headers={"Connection": "close"},
+        ),
+        max_retries=3,
+    )
 
     # Init the dataset factory.
     dataset_factory = DatasetFactory(
-        model, None, tokenizer, args.dataset_category, num_of_examples, args.output_length, 
+        client, args.dataset_category, num_of_examples, int(args.output_length), 
         dump_dir, use_cache=args.lm_use_cache, master_data_dir=args.master_data_dir,
-        seed=args.seed, lm_model=args.lm_model, start_concept_id=start_concept_id, is_chat_model=is_chat_model,
-        include_system_prompt=include_system_prompt,
+        seed=int(args.seed), lm_model=args.lm_model, start_concept_id=start_concept_id, 
+        is_inference=True, is_dpo=True, concepts=concepts,
+        disable_local_model=args.disable_local_model,
     )
     atexit.register(dataset_factory.save_cache)
     atexit.register(dataset_factory.reset_stats)
@@ -565,32 +591,42 @@ def generate_dpo_training(args, generate_args):
     existing_df = existing_df.rename(
         columns={
             'output': 'winning_output', 
-            'output_concept': 'winning_output_concept',
         }
     )
-    negative_df = existing_df[existing_df["category"] == "negative"] # keep later to concate.
-    negative_df["losing_output"] = negative_df["winning_output"]
-    negative_df["losing_output_concept"] = negative_df["winning_output_concept"]
-    save_dpo(dump_dir, -1, 'dpo', negative_df)
 
-    progress_bar = tqdm(range(start_concept_id, len(concepts)), desc="Processing concept")
-    for concept_id in progress_bar:
-        concept, ref = concepts[concept_id]
+    model, tokenizer = None, None
+    if args.keep_orig_axbench_format:
+        # we need to load the model and the tokenizer back in this case to generate
+        # the same data distribution as AxBench original to keep the comparison fair.
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_name, torch_dtype=torch.bfloat16)
+        is_chat_model = True if args.model_name in CHAT_MODELS else False
+        include_system_prompt = True if args.model_name in HAS_SYSTEM_PROMPT_MODELS else False
+        model = model.cuda()
+        tokenizer =  AutoTokenizer.from_pretrained(args.model_name, model_max_length=512)
+        tokenizer.padding_side = "right"
+
+    progress_bar = tqdm(range(start_concept_id, len(metadata)), desc="Processing concept")
+    for start_idx in progress_bar:
+        concept_id = metadata[start_idx]["concept_id"]
+        concept = metadata[start_idx]["concept"]
         print(f"Generating for concept: {concept}...")
-        existing_df = existing_df[existing_df["concept_id"] == concept_id].copy()
+        current_df = existing_df[existing_df["concept_id"] == concept_id].copy()
         dpo_df = dataset_factory.create_dpo_df(
-            existing_df,
-            output_length=args.output_length,
-            is_chat_model=is_chat_model,
-            include_system_prompt=include_system_prompt,
-            batch_size=args.inference_batch_size,
+            current_df,
+            output_length=int(args.output_length),
+            batch_size=int(args.inference_batch_size),
+            model=model,
+            tokenizer=tokenizer,
+            keep_orig_axbench_format=args.keep_orig_axbench_format,
+            steer_data_type = args.steer_data_type            
         )
 
         save_dpo(dump_dir, concept_id, 'dpo', dpo_df)
-        logger.warning(f"Saved inference dataset for concept {concept_id} to latent_eval_data.parquet")
+        logger.warning(f"Saved dpo dataset for concept {concept_id} to dpo_train_data.parquet")
         # After processing, save state
         current_state = {'concept_id': concept_id}
-        save_state_dpo(args.dump_dir, current_state, 'latent')
+        save_state_dpo(dump_dir, current_state, 'dpo')
 
     logger.warning(f"Finished creating DPO dataset.")
 
