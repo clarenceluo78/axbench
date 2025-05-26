@@ -481,14 +481,18 @@ def main():
                 'default': "all",
                 'help': 'The evaluation mode.'
             }
-        }
+        },
     ]
-    args = EvalArgs(custom_args=custom_args, section="evaluate")
-    args.data_dir = f"{args.dump_dir}/inference"
+    args = EvalArgs(custom_args=custom_args, section="evaluate", ignore_unknown=True)
+    if args.mode == "train_data":
+        args.data_dir = f"{args.dump_dir}/generate" if args.overwrite_inference_dump_dir is None else Path(args.overwrite_inference_dump_dir)
+    else:
+        args.data_dir = f"{args.dump_dir}/inference" if args.overwrite_inference_dump_dir is None else Path(args.overwrite_inference_dump_dir)
     logger.warning("Evaluating generations with the following configuration:")
     logger.warning(args)
-    
-    dump_dir = Path(args.dump_dir) / "evaluate"
+
+    dump_dir = Path(args.dump_dir) / "evaluate" if args.overwrite_evaluate_dump_dir is None else Path(args.overwrite_evaluate_dump_dir)
+
     dump_dir.mkdir(parents=True, exist_ok=True)
 
     # now = datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")
@@ -509,6 +513,8 @@ def main():
     if args.mode == "latent":
         eval_latent(args)
     elif "steering" in args.mode: # steering or steering_test
+        eval_steering(args)
+    elif args.mode == "train_data":
         eval_steering(args)
     elif args.mode == "all":
         eval_latent(args)

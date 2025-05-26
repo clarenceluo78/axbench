@@ -5,10 +5,10 @@ from typing import Optional, List, Type
 
 @dataclass
 class EvalArgs:
-    models: field(default_factory=lambda: [])
-    latent_evaluators: field(default_factory=lambda: [])
-    steering_evaluators: field(default_factory=lambda: [])
-    report_to: field(default_factory=lambda: [])
+    models: List[str] = field(default_factory=lambda: [])
+    latent_evaluators: List[str] = field(default_factory=lambda: [])
+    steering_evaluators: List[str] = field(default_factory=lambda: [])
+    report_to: List[str] = field(default_factory=lambda: [])
     rotation_freq: Optional[int] = 1_000
     data_dir: Optional[str] = None
     dump_dir: Optional[str] = None
@@ -22,6 +22,10 @@ class EvalArgs:
     winrate_split_ratio: Optional[float] = None
     master_data_dir: Optional[str] = None
     prompt_steering_data_dir: Optional[str] = None
+    overwrite_inference_dump_dir: Optional[str] = None
+    overwrite_evaluate_dump_dir: Optional[str] = None
+    steer_data_type: Optional[str] = "concept"
+    defense: Optional[List[str]] = field(default_factory=lambda: [])
 
     def __init__(
         self,
@@ -29,7 +33,8 @@ class EvalArgs:
         config_file: str = None,
         section: str = "train",  # Specify section to load
         custom_args: Optional[List[dict]] = None,
-        override_config: bool = True
+        override_config: bool = True,
+        ignore_unknown: bool = False
     ):
         """
         Initializes EvalArgs by parsing command-line arguments and loading configurations from a YAML file.
@@ -50,19 +55,33 @@ class EvalArgs:
             if field_name == 'config_file':
                 continue
 
-            arg_type = self._get_argparse_type(field_def.type)
-            parser.add_argument(
-                f'--{field_name}',
-                type=arg_type,
-                help=f'Specify {field_name}.',
-            )
+            # Handle list-type fields specially for command line input
+            if hasattr(field_def.type, '__origin__') and field_def.type.__origin__ is list:
+                parser.add_argument(
+                    f'--{field_name}',
+                    nargs='+',  # This allows multiple values
+                    help=f'Specify {field_name} (can provide multiple values).',
+                )
+            else:
+                arg_type = self._get_argparse_type(field_def.type)
+                parser.add_argument(
+                    f'--{field_name}',
+                    type=arg_type,
+                    help=f'Specify {field_name}.',
+                )
 
         # Add any custom arguments provided
         if custom_args:
             for arg in custom_args:
                 parser.add_argument(*arg['args'], **arg['kwargs'])
 
-        args = parser.parse_args()
+        # Use parse_known_args instead of parse_args if ignore_unknown is True
+        if ignore_unknown:
+            args, unknown = parser.parse_known_args()
+            if unknown:
+                print(f"EvalArgs: ignoring unknown arguments: {unknown}")
+        else:
+            args = parser.parse_args()
 
         # Load the YAML configuration file
         config_file_path = args.config

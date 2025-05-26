@@ -27,6 +27,12 @@ from .models.mean import *
 from .models.prompt import *
 from .models.bow import *
 from .models.language_models import *
+from .models.preference_lora import *
+from .models.preference_reft import *
+from .models.concept_lora import *
+from .models.concept_reft import *
+from .models.preference_vector import *
+from .models.concept_vector import *
 
 from .scripts.args.eval_args import *
 from .scripts.args.training_args import *

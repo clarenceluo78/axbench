@@ -921,6 +921,7 @@ def infer_latent_on_train_data(args, rank, world_size, device, logger, training_
     if rank == 0:
         logger.warning("All ranks have finished inference.")
 
+
 def main():
     custom_args = [
         {
@@ -930,36 +931,25 @@ def main():
                 'default': "all",
                 'help': 'The inference mode.'
             }
-        },
-        {
-            'args': ['--overwrite_inference_data_dir'],
-            'kwargs': {
-                'type': str,
-                'help': 'The directory to load pre-generated inference data.'
-            }
-        },
-        {
-            'args': ['--overwrite_metadata_dir'],
-            'kwargs': {
-                'type': str,
-                'help': 'The directory to load pre-generated metadata.'
-            }
         }
     ]
-    training_args = TrainingArgs(section="train")
-    generate_args = DatasetArgs(custom_args=custom_args, section="generate")
-    args = DatasetArgs(custom_args=custom_args, section="inference")
+    training_args = TrainingArgs(custom_args=custom_args, section="train", ignore_unknown=True)
+    generate_args = DatasetArgs(custom_args=custom_args, section="generate", ignore_unknown=True)
+    inference_args = DatasetArgs(custom_args=custom_args, section="inference", ignore_unknown=True)
+
     if training_args.overwrite_metadata_dir is not None and os.path.exists(training_args.overwrite_metadata_dir):
-        args.data_dir = training_args.overwrite_metadata_dir # since we only load metadata from this dir
+        inference_args.data_dir = training_args.overwrite_metadata_dir # since we only load metadata from this dir
     else:
-        args.data_dir = f"{args.dump_dir}/generate"
-    args.train_dir = f"{args.dump_dir}/train"
+        inference_args.data_dir = f"{inference_args.dump_dir}/generate"
+    inference_args.train_dir = f"{inference_args.dump_dir}/train"
     logger.warning("Inferencing with following configuration:")
-    logger.warning(args)
-    set_seed(args.seed)
+    logger.warning(inference_args)
+    set_seed(inference_args.seed)
 
     # Initialize the process group
-    dist.init_process_group(backend='nccl', init_method='env://')
+    dist.init_process_group(backend='nccl', init_method='env://', 
+                          timeout=datetime.timedelta(seconds=60000))
+
 
     # Get the rank and world_size from environment variables
     rank = dist.get_rank()
@@ -995,18 +985,23 @@ def main():
     logger.addHandler(file_handler)
     """
 
-    if args.mode == "latent":
-        infer_latent(args, rank, world_size, device, logger, training_args, generate_args)
-    elif args.mode == "latent_imbalance":
-        infer_latent_imbalance(args, rank, world_size, device, logger, training_args, generate_args)
-    elif args.mode == "latent_on_train_data":
-        infer_latent_on_train_data(args, rank, world_size, device, logger, training_args, generate_args)
-    elif args.mode == "steering":
-        # steering eval must be done after latent eval.
-        infer_steering(args, rank, world_size, device, logger, training_args, generate_args)
-    elif args.mode == "all":
-        infer_latent(args, rank, world_size, device, logger, training_args, generate_args)
-        infer_steering(args, rank, world_size, device, logger, training_args, generate_args)
+    # Add suppress_eval_dir to inference_args if present in command line
+    if hasattr(inference_args, 'suppress_eval_dir'):
+        suppress_eval_dir = inference_args.suppress_eval_dir
+    else:
+        suppress_eval_dir = None
+
+    if inference_args.mode == "latent":
+        infer_latent(inference_args, rank, world_size, device, logger, training_args, generate_args)
+    elif inference_args.mode == "latent_imbalance":
+        infer_latent_imbalance(inference_args, rank, world_size, device, logger, training_args, generate_args)
+    elif inference_args.mode == "latent_on_train_data":
+        infer_latent_on_train_data(inference_args, rank, world_size, device, logger, training_args, generate_args)
+    elif inference_args.mode == "steering":
+        infer_steering(inference_args, rank, world_size, device, logger, training_args, generate_args, suppress_eval_dir=suppress_eval_dir)
+    elif inference_args.mode == "all":
+        infer_latent(inference_args, rank, world_size, device, logger, training_args, generate_args)
+        infer_steering(inference_args, rank, world_size, device, logger, training_args, generate_args, suppress_eval_dir=suppress_eval_dir)
 
     # Finalize the process group
     dist.destroy_process_group()

@@ -217,7 +217,8 @@ def main():
     generate_args = DatasetArgs(section="generate")
 
     # Initialize the process group
-    dist.init_process_group(backend='nccl', init_method='env://')
+    dist.init_process_group(backend='nccl', init_method='env://', 
+                          timeout=datetime.timedelta(seconds=6000))
 
     # Get the rank and world_size from environment variables
     rank = dist.get_rank()
