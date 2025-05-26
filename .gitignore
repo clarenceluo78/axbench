@@ -1,3 +1,7 @@
+axbench/axbench_paper_results/
+axbench/concept500_v1/
+axbench/hypersteer_paper_results/
+axbench/removing_results/
 axbench/data/Feature-Descriptions
 tmp*
 axbench/pls_results
