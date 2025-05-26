@@ -41,7 +41,7 @@ axbench/models/dbm.py
 axbench/examples/upload.ipynb
 tmp.ipynb
 axbench/examples_internal
-*.ipynb
+human_eval.ipynb
 tmp.csv
 
 axbench/examples/*.pt
