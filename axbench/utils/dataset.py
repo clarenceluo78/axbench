@@ -1,6 +1,6 @@
 import pandas as pd
 import asyncio
-import os, random, json, time, requests, copy, asyncio, csv, math
+import os, re, random, json, time, requests, copy, asyncio, csv, math
 import torch, transformers, datasets
 from datasets import load_from_disk
 from dataclasses import dataclass, field
@@ -105,10 +105,77 @@ Return only the formatted examples without any additional text."""
 Prompt = namedtuple("Prompt", ["concept", "tag", "content"])
 
 
+def extract_number_from_end(text):
+    # This pattern matches one or more digits at the end of the string
+    pattern = r'(\d+)$'
+    match = re.search(pattern, text)
+    
+    if match:
+        return int(match.group(1))
+    else:
+        return None
+
+
 async def run_tasks(tasks):
     # Gather and run all provided tasks concurrently, and collect their results
     results = await asyncio.gather(*tasks)
     return results
+
+def clean_text(text):
+    if pd.isna(text):
+        return text
+    
+    # Convert to string if not already
+    text = str(text)
+    
+    # Remove numbered list prefixes (handles various formats)
+    cleaned = re.sub(r'\n\d+\.\s*', '\n\n', text)
+
+    return cleaned
+
+
+def get_best_factors_rule(steered_data, type_):
+    # Store best scores for each concept
+    concepts = steered_data['concept_id'].unique()
+    best_scores = []   
+    best_metrics = []
+    best_factors = []
+    # For each concept, split data and find best factor
+    for concept in concepts:
+        concept_data = steered_data[steered_data['concept_id'] == concept]     
+        # Get indices for this concept's data
+        indices = concept_data.index.values
+
+        train_data = concept_data[concept_data['input_id'].isin([0,1,2,3,4])]
+        test_data = concept_data[concept_data['input_id'].isin([5,6,7,8,9])]
+        assert len(train_data) == len(test_data)
+
+        # Calculate average score for each factor in the training data
+        factor_avg_scores = train_data.groupby('factor')[f'{type_}_RuleEvaluator'].mean()
+        
+        # Find the factor with the highest average score
+        if not factor_avg_scores.empty:
+            best_factor = factor_avg_scores.idxmax()
+            
+            # Get scores for the best factor using test data
+            test_factor_data = test_data[test_data['factor'] == best_factor]
+            
+            if len(test_factor_data) > 0:  # Only add if we have test data for this factor
+                # Get all metrics for this best factor using mean of test data
+                for idx, i in enumerate(range(len(test_factor_data))):
+                    metrics_data = {
+                        'Concept': f'Concept {concept}',
+                        'Factor': best_factor,
+                        'Overall': test_factor_data[f'{type_}_RuleEvaluator'].iloc[idx],
+                        'Rule Following': test_factor_data[f'{type_}_LMJudgeEvaluator_relevance_concept_ratings'].iloc[idx],
+                        'Relevance': test_factor_data[f'{type_}_LMJudgeEvaluator_relevance_instruction_ratings'].iloc[idx],
+                        'Fluency': test_factor_data[f'{type_}_LMJudgeEvaluator_fluency_ratings'].iloc[idx]
+                    }
+                    best_metrics.append(metrics_data)
+                best_scores.append(test_factor_data[f'{type_}_RuleEvaluator'].mean())
+                best_factors.append(best_factor)
+    best_metrics = pd.DataFrame(best_metrics)
+    return best_factors
 
 
 class DatasetFactory(object):

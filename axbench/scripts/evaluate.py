@@ -263,7 +263,7 @@ def plot_steering(aggregated_results, dump_dir, report_to=[], wandb_name=None, m
 def eval_steering_single_task(args_tuple):
     """Helper function to evaluate a single concept-model-evaluator combination"""
     concept_id, current_df, evaluator_name, model_name, dump_dir, \
-        lm_model, winrate_baseline, lm_caches = args_tuple
+        lm_model, winrate_baseline, lm_caches, steer_dataset_type = args_tuple
     
     # Create LanguageModel instance within the worker process
     client = AsyncOpenAI(
@@ -286,7 +286,8 @@ def eval_steering_single_task(args_tuple):
         cache_level="prompt",
         cache_tag="evaluate",
         master_data_dir="axbench/data",
-        temperature=0.7
+        temperature=0.0 # for the newest release, we switch to temperature 0.0 for all models.
+                        # for the original axbench, we use temperature 0.7.
     )
     # overwrite cache if any.
     if bool(lm_caches):
@@ -294,10 +295,22 @@ def eval_steering_single_task(args_tuple):
     
     try:
         evaluator_class = getattr(axbench, evaluator_name)
-        evaluator = evaluator_class(
+        ### accomodate for rule special cases that need stanza
+        if "Rule" in evaluator_name and current_df['input_concept'].iloc[0] in NEED_STANZA:
+            evaluator = evaluator_class(
             model_name, dump_dir=dump_dir, 
-            concept_id=concept_id, lm_model=lm_model, winrate_baseline=winrate_baseline)
-        eval_result = evaluator.compute_metrics(current_df)
+            concept_id=concept_id, lm_model=lm_model, winrate_baseline=winrate_baseline, steer_dataset_type=steer_dataset_type, nlp=nlp)
+        else:
+            evaluator = evaluator_class(
+            model_name, dump_dir=dump_dir, 
+            concept_id=concept_id, lm_model=lm_model, winrate_baseline=winrate_baseline, steer_dataset_type=steer_dataset_type)
+
+        if "Rule" in evaluator_name and "winning_output" not in current_df.columns:
+            eval_result = evaluator.compute_metrics(current_df, rule_type = CONCEPT_TO_RULE[current_df['input_concept'].iloc[0]])
+        elif "Rule" in evaluator_name and "winning_output" in current_df.columns:
+            eval_result = evaluator.compute_metrics_train(current_df, rule_type = CONCEPT_TO_RULE[current_df['output_concept'].iloc[0]])
+        else:
+            eval_result = evaluator.compute_metrics(current_df)
         return (concept_id, evaluator.__str__(), model_name.__str__(), eval_result, \
                 lm_model.stats.get_report(), None if bool(lm_caches) else lm_model.cache_in_mem, current_df)
     finally:

@@ -102,6 +102,63 @@ class InterventionDataCollator(object):
         return batch_inputs
 
 
+@dataclass
+class PreferenceInterventionDataCollator(object):
+
+    tokenizer: transformers.AutoTokenizer
+    data_collator: transformers.DataCollator
+    preference_pairs: List[str]
+
+    def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
+        # get max lengths for padding
+        max_intervention_len = -1
+        max_seq_len = -1
+        for instance in instances:
+            for k, v in instance.items():
+                if "_intervention_locations" in k:
+                    max_intervention_len = max(max_intervention_len, len(v[0]))
+                if "_input_ids" in k:
+                    max_seq_len = max(max_seq_len, len(v))
+
+        for inst in instances:
+            for pair in self.preference_pairs:
+                winning_non_pad_len = len(inst[f"{pair}_winning_input_ids"])
+                losing_non_pad_len = len(inst[f"{pair}_losing_input_ids"])
+
+                # intervention locations
+                _winning_intervention_location_paddings = torch.tensor(
+                    [[winning_non_pad_len for _ in range(max_intervention_len - len(inst[f"{pair}_winning_intervention_locations"][0]))]])
+                _losing_intervention_location_paddings = torch.tensor(
+                    [[losing_non_pad_len for _ in range(max_intervention_len - len(inst[f"{pair}_losing_intervention_locations"][0]))]])
+                inst[f"{pair}_winning_intervention_locations"] = torch.cat(
+                    [inst[f"{pair}_winning_intervention_locations"], _winning_intervention_location_paddings], dim=-1).int()
+                inst[f"{pair}_losing_intervention_locations"] = torch.cat(
+                    [inst[f"{pair}_losing_intervention_locations"], _losing_intervention_location_paddings], dim=-1).int()
+        
+                # input ids
+                _winning_input_id_paddings = torch.tensor(
+                    [self.tokenizer.pad_token_id for _ in range(max_seq_len - winning_non_pad_len)])
+                _losing_input_id_paddings = torch.tensor(
+                    [self.tokenizer.pad_token_id for _ in range(max_seq_len - losing_non_pad_len)])
+                inst[f"{pair}_winning_input_ids"] = torch.cat(
+                    (inst[f"{pair}_winning_input_ids"], torch.tensor([self.tokenizer.pad_token_id]), _winning_input_id_paddings)).int()
+                inst[f"{pair}_losing_input_ids"] = torch.cat(
+                    (inst[f"{pair}_losing_input_ids"], torch.tensor([self.tokenizer.pad_token_id]), _losing_input_id_paddings)).int()  
+                
+                # labels
+                _winning_label_paddings = torch.tensor([-100 for _ in range(max_seq_len - winning_non_pad_len+1)])
+                _losing_label_paddings = torch.tensor([-100 for _ in range(max_seq_len - losing_non_pad_len+1)])
+                inst[f"{pair}_winning_labels"] = torch.cat((inst[f"{pair}_winning_labels"], _winning_label_paddings))
+                inst[f"{pair}_losing_labels"] = torch.cat((inst[f"{pair}_losing_labels"], _losing_label_paddings))
+        
+                # attention mask
+                inst[f"{pair}_winning_attention_mask"] = (inst[f"{pair}_winning_input_ids"] != self.tokenizer.pad_token_id).int()
+                inst[f"{pair}_losing_attention_mask"] = (inst[f"{pair}_losing_input_ids"] != self.tokenizer.pad_token_id).int()
+            
+        batch_inputs = self.data_collator(instances)
+        return batch_inputs
+
+
 def make_data_module(
     tokenizer: transformers.PreTrainedTokenizer, df, 
     dataset_category="continuation",
@@ -172,3 +229,183 @@ def make_data_module(
     data_collator = InterventionDataCollator(tokenizer=tokenizer, data_collator=data_collator_fn)
     return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
 
+
+def get_prompt_suffix_length(tokenizer):
+    message_a = [{"role": "user", "content": 'a'}]
+    message_b = [{"role": "user", "content": 'b'}]
+    tokens_a = tokenizer.apply_chat_template(message_a, tokenize=True, add_generation_prompt=True)
+    tokens_b = tokenizer.apply_chat_template(message_b, tokenize=True, add_generation_prompt=True)
+    suffix_length = 0
+    for i, (ta, tb) in enumerate(zip(reversed(tokens_a), reversed(tokens_b))):
+        if ta != tb:
+            suffix_length = i
+            break
+    return suffix_length, tokenizer.decode(tokens_a[-suffix_length:])
+
+
+def preprocess_preference_data(
+    tokenizer, prompt, winning_output, losing_output, positions, prefix_length, prefix_tuning
+):
+    """For each condition above, we need to preprocess the data."""
+    prompt_suffix_length, prompt_suffix = get_prompt_suffix_length(tokenizer)
+    
+    if isinstance(winning_output, float):
+        winning_output = tokenizer.eos_token
+    if isinstance(losing_output, float):
+        losing_output = tokenizer.eos_token
+
+    winning_input = prompt + winning_output
+    losing_input = prompt + losing_output
+
+    prompt_ids = tokenizer(
+        prompt, 
+        max_length=tokenizer.model_max_length, 
+        truncation=True, 
+        return_tensors="pt")["input_ids"][0]
+    winning_input_ids = tokenizer(
+        winning_input, 
+        max_length=tokenizer.model_max_length, 
+        truncation=True, 
+        return_tensors="pt")["input_ids"][0]
+    losing_input_ids = tokenizer(
+        losing_input, 
+        max_length=tokenizer.model_max_length, 
+        truncation=True, 
+        return_tensors="pt")["input_ids"][0]
+    
+    prompt_length = len(prompt_ids)
+    winning_output_length = len(winning_input_ids)
+    losing_output_length = len(losing_input_ids)
+
+    # output ids with prompt token mask
+    winning_output_ids = winning_input_ids.clone()
+    losing_output_ids = losing_input_ids.clone()
+    winning_output_ids[:prompt_length] = -100
+    losing_output_ids[:prompt_length] = -100
+
+    if prefix_tuning:
+        # before trying this, we already tried adding a token before BOS, etc.. it did not work.
+        winning_intervention_locations = torch.tensor([[prefix_length]]) # only intervene on the first token
+        losing_intervention_locations = torch.tensor([[prefix_length]]) # only intervene on the first token
+    elif positions is None or positions == "all_prompt":
+        winning_intervention_locations = torch.tensor([[i for i in range(prefix_length, prompt_length)]])
+        losing_intervention_locations = torch.tensor([[i for i in range(prefix_length, prompt_length)]])
+    elif positions == "all":
+        winning_intervention_locations = torch.tensor([[i for i in range(prefix_length, winning_output_length)]])
+        losing_intervention_locations = torch.tensor([[i for i in range(prefix_length, losing_output_length)]])
+    elif positions == "all_generation":
+        winning_intervention_locations = torch.tensor([[i for i in range(
+            prompt_length - prompt_suffix_length, winning_output_length)]])
+        losing_intervention_locations = torch.tensor([[i for i in range(
+            prompt_length - prompt_suffix_length, losing_output_length)]])
+    elif "f" in positions or "l" in positions or "+" in positions:
+        first_n, last_n = parse_positions(positions)
+        intervention_locations = get_intervention_locations(
+            last_position=prompt_length - prefix_length, 
+            first_n=first_n, 
+            last_n=last_n,
+            pad_mode="last",
+            num_interventions=1,
+            share_weights=True,
+        )
+        # shift intervention locations by prefix length
+        shifted_intervention_locations = [[loc + prefix_length for loc in intervention_locations[0]]]
+        winning_intervention_locations = torch.tensor(shifted_intervention_locations)
+        losing_intervention_locations = torch.tensor(shifted_intervention_locations)
+    else:
+        raise NotImplementedError(f"Positions {positions} not implemented")
+    
+    return {
+        "winning_input_ids": winning_input_ids,
+        "losing_input_ids": losing_input_ids,
+        "winning_labels": winning_output_ids,
+        "losing_labels": losing_output_ids,
+        "winning_intervention_locations": winning_intervention_locations,
+        "losing_intervention_locations": losing_intervention_locations,
+        "prompt_lengths": torch.tensor(prompt_length - 1),
+    }
+    
+
+def make_preference_data_module(
+    tokenizer: transformers.PreTrainedTokenizer, df, 
+    dataset_category="continuation",
+    positions="all", # "all_prompt" or "all" or "f1+l1" (pyreft formatting)
+    exclude_bos=True,
+    prefix_length=1,
+    preference_pairs=["orig_add"],
+    prefix_tuning=False,
+    steering_prompt_type="prepend",
+    **kwargs
+):
+    """
+    4-way preference training setup:
+
+    - original instruction + steering:
+        - winning: LLM Steered Response
+        - losing: LM Response to Original Instruction
+
+    - original instruction - steering:
+        - winning: LM Response to Original Instruction
+        - losing: LLM Steered Response
+
+    - steered instruction + steering:
+        - winning: LLM Steered Response
+        - losing: LM Response to Original Instruction
+
+    - steered instruction - steering:
+        - winning: LM Response to Original Instruction
+        - losing: LM Response to Steered Instruction
+    """
+    if not exclude_bos:
+        prefix_length = 0
+
+    all_data = {}
+    for pair in preference_pairs:
+        all_data[f"{pair}_winning_input_ids"] = []
+        all_data[f"{pair}_losing_input_ids"] = []
+        all_data[f"{pair}_winning_intervention_locations"] = []
+        all_data[f"{pair}_losing_intervention_locations"] = []
+        all_data[f"{pair}_winning_labels"] = []
+        all_data[f"{pair}_losing_labels"] = []
+        all_data[f"{pair}_prompt_lengths"] = []
+
+    for _, row in df.iterrows():
+        if f"{steering_prompt_type}_steered_input" not in row:
+            input, winning_output, losing_output = \
+                row["input"], row["winning_output"], row["losing_output"]
+            steered_input = None
+            steered_output = None
+        else:
+            input, steered_input, winning_output, losing_output, steered_output = \
+                row["input"], row[f"{steering_prompt_type}_steered_input"], row["winning_output"], row["losing_output"], row[f"{steering_prompt_type}_steered_output"]
+
+        for pair in preference_pairs:
+            if pair == "orig_add":
+                new_data = preprocess_preference_data(
+                    tokenizer, input, winning_output, losing_output, positions, prefix_length, prefix_tuning
+                )
+            elif pair == "orig_sub":
+                new_data = preprocess_preference_data(
+                    tokenizer, input, losing_output, winning_output, positions, prefix_length, prefix_tuning
+                )
+            elif pair == "steered_add":
+                new_data = preprocess_preference_data(
+                    tokenizer, steered_input, winning_output, losing_output, positions, prefix_length, prefix_tuning
+                )
+            elif pair == "steered_sub":
+                new_data = preprocess_preference_data(
+                    tokenizer, steered_input, losing_output, steered_output, positions, prefix_length, prefix_tuning
+                )
+            else:
+                raise NotImplementedError(f"Preference pair {pair} not implemented")
+            for k, v in new_data.items():
+                all_data[f"{pair}_{k}"].append(v)
+    
+    train_dataset = datasets.Dataset.from_dict(all_data)
+    train_dataset.set_format(
+        type='torch', columns=list(all_data.keys()))
+    data_collator_fn = transformers.DefaultDataCollator(
+        return_tensors="pt"
+    )
+    data_collator = PreferenceInterventionDataCollator(tokenizer=tokenizer, data_collator=data_collator_fn, preference_pairs=preference_pairs)
+    return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)

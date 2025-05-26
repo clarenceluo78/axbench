@@ -97,19 +97,21 @@ def load_metadata_flatten(metadata_path):
 
 def save(
     dump_dir, partition,
-    current_df, rank, subfolder="inference"):
+    current_df, rank):
     # This function saves DataFrames per rank per partition (latent or steering)
-    dump_dir = Path(dump_dir) / subfolder
+    dump_dir = Path(dump_dir)
     dump_dir.mkdir(parents=True, exist_ok=True)
     # Save DataFrame
     df_path = os.path.join(dump_dir, f"rank_{rank}_{partition}_data.parquet")
-    
+    current_df["defense"] = current_df["defense"].apply(lambda x: "["+','.join(x)+"]" if isinstance(x, list) else str(x))
     if os.path.exists(df_path):
         existing_df = pd.read_parquet(df_path)
+        
+        existing_df["defense"] = existing_df["defense"].apply(lambda x: "["+','.join(x)+"]" if isinstance(x, list) else str(x))
         combined_df = pd.concat([existing_df, current_df], ignore_index=True)
     else:
         combined_df = current_df
-    
+
     combined_df.to_parquet(df_path, engine='pyarrow')
 
 
