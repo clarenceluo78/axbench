@@ -6,7 +6,7 @@
 
 <br>
 
-**AxBench** is a a scalable benchmark that evaluates interpretability techniques on two axes: *concept detection* and *model steering*. This repo includes all benchmarking code, including data generation, training, evaluation, and analysis.
+**AxBench** is a a scalable benchmark that evaluates interpretability techniques on two axes: *concept detection* and *model steering*.
 
 - 🤗 **HuggingFace**: [**AxBench Collections**](https://huggingface.co/collections/pyvene/axbench-release-6787576a14657bb1fc7a5117)  
 - [<img align="center" src="https://colab.research.google.com/assets/colab-badge.svg" />](https://colab.research.google.com/github/stanfordnlp/axbench/blob/main/axbench/examples/tutorial.ipynb) **Tutorial of using our dictionary via [pyvene](https://github.com/stanfordnlp/pyvene)**
@@ -14,6 +14,7 @@
 
 ## 🏆 Steering leaderboard
 
+<small>
 | Method                       | 2B L10 | 2B L20 | 9B L20 | 9B L31 |  Avg |
 |------------------------------|-------:|-------:|-------:|-------:|-----:|
 | Prompt                       | 0.698 | 0.731 | **1.075** | **1.072** | **0.894** |
@@ -21,7 +22,7 @@
 | LoReFT<sup>Lang.</sup>       | 0.768 | 0.790 | 0.722 | 0.725 | 0.751 |
 | SV<sup>RePS</sup>            | 0.756 | 0.606 | 0.892 | 0.624 | 0.720 |
 | LoRA<sup>RePS</sup>          | **0.798** | 0.793 | 0.631 | 0.633 | 0.714 |
-| SFT                          | 0.637 | 0.714 |   —   |   —   | 0.676* |
+| SFT                          | 0.637 | 0.714 |   —   |   —   | 0.676 |
 | SV<sup>Lang.</sup>           | 0.663 | 0.568 | 0.788 | 0.580 | 0.650 |
 | LoRA<sup>Lang.</sup>         | 0.710 | 0.723 | 0.578 | 0.549 | 0.640 |
 | ReFT-r1                      | 0.633 | 0.509 | 0.630 | 0.401 | 0.543 |
@@ -35,8 +36,7 @@
 | Probe                        | 0.095 | 0.091 | 0.108 | 0.099 | 0.098 |
 | LoReFT<sup>BiPO</sup>        | 0.077 | 0.067 | 0.075 | 0.084 | 0.076 |
 | SSV                          | 0.072 | 0.001 | 0.024 | 0.008 | 0.026 |
-
-* SFT average is over the two available scores (2B L10/L20).
+</small>
 
 
 ## 🔥 New releases
