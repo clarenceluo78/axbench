@@ -12,30 +12,32 @@
 - [<img align="center" src="https://colab.research.google.com/assets/colab-badge.svg" />](https://colab.research.google.com/github/stanfordnlp/axbench/blob/main/axbench/examples/tutorial.ipynb) **Tutorial of using our dictionary via [pyvene](https://github.com/stanfordnlp/pyvene)**
 
 
+## Related papers
+
+- Coming soon!
+- [Improved Representation Steering for Language Models [preprint]](https://arxiv.org/abs/2501.17148).
+- [SAEs Are Good for Steering -- If You Select the Right Features [preprint]](https://arxiv.org/abs/2505.20063).
+- [AxBench: Steering LLMs? Even Simple Baselines Outperform Sparse Autoencoders [ICML 2025 (spotlight)]](https://arxiv.org/abs/2501.17148).
+
+
 ## 🏆 Rank-1 steering leaderboard
+
+📢 Please open a PR to enter the leaderboard.
 
 | Method                       | 2B L10 | 2B L20 | 9B L20 | 9B L31 |  Avg |
 |------------------------------|-------:|-------:|-------:|-------:|-----:|
 | Prompt                       | 0.698 | 0.731 | **1.075** | **1.072** | **0.894** |
-| SV<sup>RePS</sup>            | 0.756 | 0.606 | 0.892 | 0.624 | 0.720 |
-| SV<sup>Lang.</sup>           | 0.663 | 0.568 | 0.788 | 0.580 | 0.650 |
+| RePS [[Wu et. al., 2025]](https://arxiv.org/abs/2501.17148)           | 0.756 | 0.606 | 0.892 | 0.624 | 0.720 |
 | ReFT-r1                      | 0.633 | 0.509 | 0.630 | 0.401 | 0.543 |
+| SAE (filtered) [[Arad et. al., 2025]](https://arxiv.org/abs/2505.20063) | - | - | 0.546 | 0.470 | 0.508 |
 | DiffMean                     | 0.297 | 0.178 | 0.322 | 0.158 | 0.239 |
-| SV<sup>BiPO</sup>            | 0.199 | 0.173 | 0.217 | 0.179 | 0.192 |
 | SAE                          | 0.177 | 0.151 | 0.191 | 0.140 | 0.165 |
 | SAE-A                        | 0.166 | 0.132 | 0.186 | 0.143 | 0.157 |
 | LAT                          | 0.117 | 0.130 | 0.127 | 0.134 | 0.127 |
 | PCA                          | 0.107 | 0.083 | 0.128 | 0.104 | 0.105 |
 | Probe                        | 0.095 | 0.091 | 0.108 | 0.099 | 0.098 |
 
-
-## 🔥 New releases
-
-- 05/25: Steering eval on [feature suppression / many-shot jailbreaking](axbench/sweep/wuzhengx/reps/README.md) are added.
-- 05/25: New *preference-based steering* method from [improved representation steering for language models](link-goes-here).
-
-
-## 🎯 Highlights
+## Highlights
 
 1. **Scalabale evaluation harness**: Framework for generating synthetic training + eval data from concept lists (e.g. GemmaScope SAE labels).
 2. **Comprehensive implementations**: 10+ interpretability methods evaluated, along with finetuning and prompting baselines.
