@@ -39,7 +39,7 @@
 
 ## 🔥 New releases
 
-- 05/25: Steering eval on feature suppression / many-shot jailbreaking are added.
+- 05/25: Steering eval on [feature suppression / many-shot jailbreaking](axbench/sweep/wuzhengx/reps/README.md) are added.
 - 05/25: New *preference-based steering* method from [improved representation steering for language models](link-goes-here).
 
 
@@ -284,3 +284,10 @@ You need to point revelant directories to your own results by modifying the note
 ## Reproducing our results.
 
 Please see `axbench/experiment_commands.txt` for detailed commands and configurations.
+
+
+## Feature suppression experiments
+In our recent paper release, we introduce feature suppresion evaluations. Please see `axbench/sweep/wuzhengx/reps/README.md` for details.
+
+
+
