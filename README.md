@@ -12,29 +12,21 @@
 - [<img align="center" src="https://colab.research.google.com/assets/colab-badge.svg" />](https://colab.research.google.com/github/stanfordnlp/axbench/blob/main/axbench/examples/tutorial.ipynb) **Tutorial of using our dictionary via [pyvene](https://github.com/stanfordnlp/pyvene)**
 
 
-## 🏆 Steering leaderboard
+## 🏆 Rank-1 steering leaderboard
 
 | Method                       | 2B L10 | 2B L20 | 9B L20 | 9B L31 |  Avg |
 |------------------------------|-------:|-------:|-------:|-------:|-----:|
 | Prompt                       | 0.698 | 0.731 | **1.075** | **1.072** | **0.894** |
-| LoReFT<sup>RePS</sup>        | 0.758 | **0.805** | 0.757 | 0.759 | 0.770 |
-| LoReFT<sup>Lang.</sup>       | 0.768 | 0.790 | 0.722 | 0.725 | 0.751 |
 | SV<sup>RePS</sup>            | 0.756 | 0.606 | 0.892 | 0.624 | 0.720 |
-| LoRA<sup>RePS</sup>          | **0.798** | 0.793 | 0.631 | 0.633 | 0.714 |
-| SFT                          | 0.637 | 0.714 |   —   |   —   | 0.676 |
 | SV<sup>Lang.</sup>           | 0.663 | 0.568 | 0.788 | 0.580 | 0.650 |
-| LoRA<sup>Lang.</sup>         | 0.710 | 0.723 | 0.578 | 0.549 | 0.640 |
 | ReFT-r1                      | 0.633 | 0.509 | 0.630 | 0.401 | 0.543 |
 | DiffMean                     | 0.297 | 0.178 | 0.322 | 0.158 | 0.239 |
 | SV<sup>BiPO</sup>            | 0.199 | 0.173 | 0.217 | 0.179 | 0.192 |
-| LoRA<sup>BiPO</sup>          | 0.149 | 0.156 | 0.209 | 0.188 | 0.176 |
 | SAE                          | 0.177 | 0.151 | 0.191 | 0.140 | 0.165 |
 | SAE-A                        | 0.166 | 0.132 | 0.186 | 0.143 | 0.157 |
 | LAT                          | 0.117 | 0.130 | 0.127 | 0.134 | 0.127 |
 | PCA                          | 0.107 | 0.083 | 0.128 | 0.104 | 0.105 |
 | Probe                        | 0.095 | 0.091 | 0.108 | 0.099 | 0.098 |
-| LoReFT<sup>BiPO</sup>        | 0.077 | 0.067 | 0.075 | 0.084 | 0.076 |
-| SSV                          | 0.072 | 0.001 | 0.024 | 0.008 | 0.026 |
 
 
 ## 🔥 New releases
