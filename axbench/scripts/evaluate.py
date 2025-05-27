@@ -7,7 +7,7 @@ import shutil
 from axbench.models.language_models import (
     LanguageModel
 )
-
+import ast
 import os, argparse, yaml, json, glob, pickle, tempfile, copy
 import pandas as pd
 from pathlib import Path
@@ -27,6 +27,7 @@ from axbench.utils.plot_utils import (
     plot_metrics,
     plot_accuracy_bars,
     plot_win_rates,
+    plot_metrics_multiple_datasets,
 )
 from axbench.templates.html_templates import (
     generate_html_with_highlight_text,
@@ -35,6 +36,12 @@ from axbench.scripts.args.eval_args import EvalArgs
 from functools import partial
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import multiprocessing
+#multiprocessing.set_start_method("spawn", force=True)
+from axbench.utils.constants import *
+import stanza
+
+# Load the English pipeline
+nlp = stanza.Pipeline('en', processors='tokenize,pos', device = "cpu")
 
 
 import logging
@@ -45,6 +52,11 @@ logger = logging.getLogger(__name__)
 
 STATE_FILE = "evaluate_state.pkl"
 
+def harmonic_mean(scores):
+    # Return 0 if any score is 0 to maintain strict evaluation
+    if 0 in scores:
+        return 0
+    return len(scores) / sum(1/s for s in scores)
 
 def data_generator(data_dir, mode, winrate_split_ratio=None):
     """
@@ -64,6 +76,8 @@ def data_generator(data_dir, mode, winrate_split_ratio=None):
         df = pd.read_parquet(os.path.join(data_dir, f'latent_data.parquet'))
     elif "steering" in mode or mode == "winrate":
         df = pd.read_parquet(os.path.join(data_dir, f'steering_data.parquet'))
+    elif mode == "train_data":
+        df = pd.read_parquet(os.path.join(data_dir, f'dpo_train_data.parquet'))
     # Group by concept_id and store in dictionary
     for concept_id, group in df.groupby('concept_id'):
         if concept_id not in concept_data:
@@ -76,7 +90,7 @@ def data_generator(data_dir, mode, winrate_split_ratio=None):
             df_subset = pd.concat(concept_data[concept_id])
         else:
             df_subset = concept_data[concept_id][0]
-        if winrate_split_ratio is not None:
+        if winrate_split_ratio is not None and float(winrate_split_ratio) > 0:
             n_input_ids = df_subset["input_id"].max()+1
             n_steering_ids = n_input_ids - round(n_input_ids * winrate_split_ratio)
             if mode == "steering":
@@ -94,6 +108,42 @@ def get_best_factors(aggregated_results):
             best_factors[result["concept_id"]][method] = scores["factor"][np.argmax(scores["lm_judge_rating"])]
     return best_factors
 
+def get_best_factors_rule(steered_data):
+    # Store best scores for each concept
+    concepts = steered_data['concept_id'].unique()
+    best_scores = []    
+    # For each concept, split data and find best factor
+    for concept in concepts:
+        concept_data = steered_data[steered_data['concept_id'] == concept]     
+        # Get indices for this concept's data
+        indices = concept_data.index.values   
+        # Randomly split indices into train and test
+        np.random.seed(42)  # for reproducibility
+        train_indices = np.random.choice(indices, size=len(indices)//2, replace=False)
+        test_indices = np.array([idx for idx in indices if idx not in train_indices])        
+        # Split data
+        train_data = concept_data.loc[train_indices]
+        test_data = concept_data.loc[test_indices]       
+        # Find the factor that gives max RuleEvaluator score on train data
+        train_rule_scores = train_data['PreferenceVector_RuleEvaluator']
+        best_factor = train_data.loc[train_rule_scores.idxmax(), 'factor']
+        
+        # Get scores for the best factor using test data
+        test_factor_data = test_data[test_data['factor'] == best_factor]
+        
+        if len(test_factor_data) > 0:  # Only add if we have test data for this factor
+            # Get all metrics for this best factor using mean of test data
+            metrics_data = {
+                'Concept': f'Concept {concept}',
+                'Factor': best_factor,
+                'Overall': test_factor_data['PreferenceVector_RuleEvaluator'].mean(),
+                'Rule Following':  test_factor_data['PreferenceVector_RuleEvaluator_rule_following'].mean(),
+                'Relevance': test_factor_data['PreferenceVector_LMJudgeEvaluator_relevance_instruction_ratings'].mean(),
+                'Fluency': test_factor_data['PreferenceVector_LMJudgeEvaluator_fluency_ratings'].mean()
+            }
+        best_scores.append(metrics_data['Factor'])
+
+    return best_scores
 
 def winrate_data_generator(data_dir, aggregated_results, winrate_split_ratio):
     best_factors = get_best_factors(aggregated_results)
@@ -122,11 +172,11 @@ def save_results(dump_dir, state, concept_id, partition, eval_results, eval_df=N
     Each line in the file represents one concept_id's evaluation results.
     """
     # handle training df first
-    dump_dir = Path(dump_dir) / "evaluate"
     dump_dir.mkdir(parents=True, exist_ok=True)
     
     # Save state
     state_path = os.path.join(dump_dir, f"{partition}_{STATE_FILE}")
+   
     with open(state_path, "wb") as f:
         pickle.dump(state, f)
     
@@ -142,6 +192,7 @@ def save_results(dump_dir, state, concept_id, partition, eval_results, eval_df=N
     # save the steering ratings for each example
     if eval_df is not None:
         sorted_evaluator_names = sorted(list(eval_df.keys()))
+        # print(sorted_evaluator_names)
         sorted_model_names = sorted(list(eval_df[sorted_evaluator_names[0]].keys()))
         if len(sorted_evaluator_names) == 0:
             return
@@ -152,24 +203,57 @@ def save_results(dump_dir, state, concept_id, partition, eval_results, eval_df=N
             for model_name in sorted_model_names:
                 if evaluator_name == sorted_evaluator_names[0] and model_name == sorted_model_names[0]:
                     continue
-                current_df[f"{model_name}_{evaluator_name}"] = eval_df[evaluator_name][model_name][f"{model_name}_{evaluator_name}"]
+                if evaluator_name == "LMJudgeEvaluator":
+                    current_df[f"{model_name}_{evaluator_name}"] = eval_df[evaluator_name][model_name][f"{model_name}_{evaluator_name}"]
 
-                current_df[f"{model_name}_{evaluator_name}_relevance_concept_ratings"] = \
-                    eval_df[evaluator_name][model_name][f"{model_name}_{evaluator_name}_relevance_concept_ratings"]
-                current_df[f"{model_name}_{evaluator_name}_relevance_concept_completions"] = \
-                    eval_df[evaluator_name][model_name][f"{model_name}_{evaluator_name}_relevance_concept_completions"]
-                
-                current_df[f"{model_name}_{evaluator_name}_relevance_instruction_ratings"] = \
-                    eval_df[evaluator_name][model_name][f"{model_name}_{evaluator_name}_relevance_instruction_ratings"]
-                current_df[f"{model_name}_{evaluator_name}_relevance_instruction_completions"] = \
-                    eval_df[evaluator_name][model_name][f"{model_name}_{evaluator_name}_relevance_instruction_completions"]
-                
-                current_df[f"{model_name}_{evaluator_name}_fluency_ratings"] = \
-                    eval_df[evaluator_name][model_name][f"{model_name}_{evaluator_name}_fluency_ratings"]
-                current_df[f"{model_name}_{evaluator_name}_fluency_completions"] = \
-                    eval_df[evaluator_name][model_name][f"{model_name}_{evaluator_name}_fluency_completions"]
-                
+                    current_df[f"{model_name}_{evaluator_name}_relevance_concept_ratings"] = \
+                        eval_df[evaluator_name][model_name][f"{model_name}_{evaluator_name}_relevance_concept_ratings"]
+                    current_df[f"{model_name}_{evaluator_name}_relevance_concept_completions"] = \
+                        eval_df[evaluator_name][model_name][f"{model_name}_{evaluator_name}_relevance_concept_completions"]
+                    
+                    current_df[f"{model_name}_{evaluator_name}_relevance_instruction_ratings"] = \
+                        eval_df[evaluator_name][model_name][f"{model_name}_{evaluator_name}_relevance_instruction_ratings"]
+                    current_df[f"{model_name}_{evaluator_name}_relevance_instruction_completions"] = \
+                        eval_df[evaluator_name][model_name][f"{model_name}_{evaluator_name}_relevance_instruction_completions"]
+                    
+                    current_df[f"{model_name}_{evaluator_name}_fluency_ratings"] = \
+                        eval_df[evaluator_name][model_name][f"{model_name}_{evaluator_name}_fluency_ratings"]
+                    current_df[f"{model_name}_{evaluator_name}_fluency_completions"] = \
+                        eval_df[evaluator_name][model_name][f"{model_name}_{evaluator_name}_fluency_completions"]
+                else:
+                    try:
+                        current_df[f"{model_name}_{evaluator_name}_rule_following"] = \
+                            eval_df[evaluator_name][model_name][f"{model_name}_{evaluator_name}_rule_following"]
+
+                        
+                    except:
+                        current_df[f"{model_name}_{evaluator_name}_rule_following_winning"] = \
+                            eval_df[evaluator_name][model_name][f"{evaluator_name}_rule_following_winning"]
+                        current_df[f"{model_name}_{evaluator_name}_rule_following_losing"] = \
+                            eval_df[evaluator_name][model_name][f"{evaluator_name}_rule_following_losing"]
+                    
         df_path = os.path.join(dump_dir, f"{partition}_data.parquet")
+        for model_name in sorted_model_names:
+            if "RuleEvaluator" in sorted_evaluator_names:
+
+                col1 = f"{model_name}_LMJudgeEvaluator_relevance_instruction_ratings"
+                col2 = f"{model_name}_LMJudgeEvaluator_fluency_ratings"
+                col3 = f"{model_name}_RuleEvaluator_rule_following"
+                
+                def safe_hmean(row):
+                    values = [row.get(col1, None), row.get(col2, None), row.get(col3, None)]
+                    print("out", values)
+                    dataset_name = current_df["dataset_name"].iloc[0] if "dataset_name" in current_df.columns else ""
+                    print(dataset_name)
+                    if "Suppress" in dataset_name or "Attack" in dataset_name:
+                        values_ = [values[0], values[1], 2 - values[2]]
+                        print("in", values_)
+                    else:
+                        values_ = values
+                    return harmonic_mean(values_)
+                
+                current_df[f"{model_name}_{evaluator_name}"] = current_df.apply(safe_hmean, axis=1)
+
         if os.path.exists(df_path):
             existing_df = pd.read_parquet(df_path)
             combined_df = pd.concat([existing_df, current_df], ignore_index=True)
@@ -188,7 +272,7 @@ def load_state(dump_dir, mode):
     Returns:
         dict: The loaded state dictionary, or None if no state file exists.
     """
-    state_path = os.path.join(f"{dump_dir}/evaluate", f"{mode}_{STATE_FILE}")
+    state_path = os.path.join(f"{dump_dir}", f"{mode}_{STATE_FILE}")
     if os.path.exists(state_path):
         with open(state_path, "rb") as f:
             return pickle.load(f)
@@ -207,15 +291,15 @@ def process_jsonl_file(jsonl_lines):
     return jsonl_lines
 
 
-def plot_steering(aggregated_results, dump_dir, report_to=[], wandb_name=None, mode=None):
+def plot_steering(aggregated_results, dump_dir, report_to=[], wandb_name=None, mode=None, rule = False):
     try:
         configs = [
-            {
-                'evaluator_name': 'PerplexityEvaluator',
-                'metric_name': 'perplexity',
-                'y_label': 'Perplexity',
-                'use_log_scale': False
-            },
+            # {
+            #     'evaluator_name': 'PerplexityEvaluator',
+            #     'metric_name': 'perplexity',
+            #     'y_label': 'Perplexity',
+            #     'use_log_scale': False
+            # },
             {
                 'evaluator_name': 'LMJudgeEvaluator',
                 'metric_name': 'relevance_concept_ratings',
@@ -246,6 +330,12 @@ def plot_steering(aggregated_results, dump_dir, report_to=[], wandb_name=None, m
                 'y_label': 'Strength',
                 'use_log_scale': False
             },
+            {
+                'evaluator_name': 'RuleEvaluator',
+                'metric_name': 'rule_following',
+                'y_label': 'Rule',
+                'use_log_scale': False
+            }
         ]
         plot_metrics(
             jsonl_data=aggregated_results,
@@ -255,6 +345,7 @@ def plot_steering(aggregated_results, dump_dir, report_to=[], wandb_name=None, m
             wandb_name=wandb_name,
             mode=mode
         )
+
     except Exception as e:
         logger.warning(f"Failed to plot: {e}")
 
@@ -262,7 +353,7 @@ def plot_steering(aggregated_results, dump_dir, report_to=[], wandb_name=None, m
 def eval_steering_single_task(args_tuple):
     """Helper function to evaluate a single concept-model-evaluator combination"""
     concept_id, current_df, evaluator_name, model_name, dump_dir, \
-        lm_model, winrate_baseline, lm_caches = args_tuple
+        lm_model, winrate_baseline, lm_caches, steer_dataset_type = args_tuple
     
     # Create LanguageModel instance within the worker process
     client = AsyncOpenAI(
@@ -285,7 +376,7 @@ def eval_steering_single_task(args_tuple):
         cache_level="prompt",
         cache_tag="evaluate",
         master_data_dir="axbench/data",
-        temperature=0.7
+        temperature=0.0
     )
     # overwrite cache if any.
     if bool(lm_caches):
@@ -293,10 +384,22 @@ def eval_steering_single_task(args_tuple):
     
     try:
         evaluator_class = getattr(axbench, evaluator_name)
-        evaluator = evaluator_class(
+        ### accomodate for rule special cases that need stanza
+        if "Rule" in evaluator_name and current_df['input_concept'].iloc[0] in NEED_STANZA:
+            evaluator = evaluator_class(
             model_name, dump_dir=dump_dir, 
-            concept_id=concept_id, lm_model=lm_model, winrate_baseline=winrate_baseline)
-        eval_result = evaluator.compute_metrics(current_df)
+            concept_id=concept_id, lm_model=lm_model, winrate_baseline=winrate_baseline, steer_dataset_type=steer_dataset_type, nlp=nlp)
+        else:
+            evaluator = evaluator_class(
+            model_name, dump_dir=dump_dir, 
+            concept_id=concept_id, lm_model=lm_model, winrate_baseline=winrate_baseline, steer_dataset_type=steer_dataset_type)
+
+        if "Rule" in evaluator_name and "winning_output" not in current_df.columns:
+            eval_result = evaluator.compute_metrics(current_df, rule_type = CONCEPT_TO_RULE[current_df['input_concept'].iloc[0]])
+        elif "Rule" in evaluator_name and "winning_output" in current_df.columns:
+            eval_result = evaluator.compute_metrics_train(current_df, rule_type = CONCEPT_TO_RULE[current_df['output_concept'].iloc[0]])
+        else:
+            eval_result = evaluator.compute_metrics(current_df)
         return (concept_id, evaluator.__str__(), model_name.__str__(), eval_result, \
                 lm_model.stats.get_report(), None if bool(lm_caches) else lm_model.cache_in_mem, current_df)
     finally:
@@ -321,29 +424,135 @@ def eval_steering(args):
     # Load previous state if exists
     state = load_state(args.dump_dir, mode=args.mode)
     start_concept_id = state.get("concept_id", 0) if state else 0
+    finish_stanza = state.get("stanza", False) if state else False
     logger.warning(f"Starting concept_id: {start_concept_id}")
 
-    # Create all evaluation tasks - flattened for maximum parallelization
+    if "PromptSteering" in args.models and args.defense is not None:
+        # Remove PromptSteering from the models list
+        args.models = [model for model in args.models if model != "PromptSteering"]
+        # Add PromptSteering_d for each defense method
+        if isinstance(args.defense, str):
+            defense_list = ast.literal_eval(args.defense)
+        else:
+            defense_list = args.defense
+        args.models.extend([f"PromptSteering_{d}" for d in defense_list])
+        print(args.models)
+        print("_"*100)
+
+
     all_tasks = [
         (concept_id, current_df, evaluator_name, model_name, args.dump_dir, \
-         args.lm_model, args.winrate_baseline, {})
+         args.lm_model, args.winrate_baseline, { }, args.steer_data_type)
         for concept_id, current_df in df_generator
         if concept_id >= start_concept_id
         for evaluator_name in args.steering_evaluators
         for model_name in args.models
         if model_name not in STEERING_EXCLUDE_MODELS
+        if not("Rule" in evaluator_name and current_df['input_concept'].iloc[0] in NEED_STANZA)
     ]
 
     # Group results by concept_id
-    all_results = {}
+
     
+
     # Run all evaluations with process pool
     logger.warning(f"Number of workers: {args.num_of_workers}; Number of CPUs: {multiprocessing.cpu_count()}")
     if not hasattr(args, 'num_of_workers') or args.num_of_workers is None:
         args.num_of_workers = max(1, multiprocessing.cpu_count() - 1)
+
     lm_reports = []
     eval_dfs = {}
+    all_results = {}
     lm_caches = {}
+    ### accomodate for rule special cases that need stanza
+    temp_results_path = os.path.join(dump_dir, f"temp_all_results.pkl")
+    temp_dfs_path = os.path.join(dump_dir, f"temp_eval_dfs.pkl")
+    print("finish stanza", finish_stanza)
+    if not finish_stanza:
+        # Create all evaluation tasks - flattened for maximum parallelization
+        print("here")
+
+        df_generator = data_generator(
+            args.data_dir, mode=args.mode, 
+            winrate_split_ratio=args.winrate_split_ratio)
+
+        all_tasks_rule_special = [
+            (concept_id, current_df, evaluator_name, model_name, args.dump_dir, \
+            args.lm_model, args.winrate_baseline, { }, args.steer_data_type)
+            for concept_id, current_df in df_generator
+            if concept_id >= start_concept_id
+            for evaluator_name in args.steering_evaluators
+            for model_name in args.models
+            if model_name not in STEERING_EXCLUDE_MODELS
+            if ("Rule" in evaluator_name and current_df['input_concept'].iloc[0] in NEED_STANZA)
+        ]
+
+        for task in all_tasks_rule_special:
+            concept_id, evaluator_str, model_str, result, lm_report, lm_cache, current_df = eval_steering_single_task(task)
+
+            if concept_id not in all_results:
+                all_results[concept_id] = {}
+                eval_dfs[concept_id] = {}
+
+            if evaluator_str not in all_results[concept_id]:
+                all_results[concept_id][evaluator_str] = {}
+                eval_dfs[concept_id][evaluator_str] = {}
+
+            all_results[concept_id][evaluator_str][model_str] = result
+
+            if ("raw_relevance_concept_ratings" in result or
+                "raw_relevance_instruction_ratings" in result or
+                "raw_fluency_ratings" in result or
+                "raw_aggregated_ratings" in result) and evaluator_str == "LMJudgeEvaluator":
+                current_df[f"{model_str}_{evaluator_str}_relevance_concept_ratings"] = result["raw_relevance_concept_ratings"]
+                current_df[f"{model_str}_{evaluator_str}_relevance_instruction_ratings"] = result["raw_relevance_instruction_ratings"]
+                current_df[f"{model_str}_{evaluator_str}_fluency_ratings"] = result["raw_fluency_ratings"]
+                current_df[f"{model_str}_{evaluator_str}"] = result["raw_aggregated_ratings"]
+                current_df[f"{model_str}_{evaluator_str}_relevance_concept_completions"] = result["relevance_concept_completions"]
+                current_df[f"{model_str}_{evaluator_str}_relevance_instruction_completions"] = result["relevance_instruction_completions"]
+                current_df[f"{model_str}_{evaluator_str}_fluency_completions"] = result["fluency_completions"]
+
+                eval_dfs[concept_id][evaluator_str][model_str] = current_df.copy()
+
+            if "rule_following" in result and evaluator_str == "RuleEvaluator" and args.mode != "train_data":
+                current_df[f"{model_str}_{evaluator_str}_rule_following"] = result["raw_rule_following"]
+                eval_dfs[concept_id][evaluator_str][model_str] = current_df.copy()
+            
+            elif "rule_following" in result and evaluator_str == "RuleEvaluator" and args.mode == "train_data":
+                current_df[f"{evaluator_str}_rule_following_winning"] = result["raw_rule_following_winning"]
+                current_df[f"{evaluator_str}_rule_following_losing"] = result["raw_rule_following_losing"]
+                eval_dfs[concept_id][evaluator_str][model_str] = current_df.copy()
+
+            lm_reports.append(lm_report)
+            lm_caches.update(lm_cache)
+            
+            logger.warning(f"Completed task for concept_id: {concept_id}, model: {model_str}, evaluator: {evaluator_str}")
+        
+
+            # Save all_results and eval_dfs as temporary files
+
+        
+        with open(temp_results_path, "wb") as f:
+            pickle.dump(all_results, f)
+        with open(temp_dfs_path, "wb") as f:
+            pickle.dump(eval_dfs, f)
+
+        # Save state
+        state_path = os.path.join(args.dump_dir, f"{args.mode}_{STATE_FILE}") 
+        with open(state_path, "wb") as f:
+            pickle.dump({"concept_id": 0, "stanza": True}, f)
+
+
+    if os.path.exists(temp_results_path):
+        with open(temp_results_path, "rb") as f:
+            print("loading temp results")
+            all_results = pickle.load(f)
+            
+    if os.path.exists(temp_dfs_path):
+        with open(temp_dfs_path, "rb") as f:
+            print("loading temp dfs")
+            eval_dfs = pickle.load(f)
+
     with ProcessPoolExecutor(max_workers=args.num_of_workers) as executor:
         for concept_id, evaluator_str, model_str, result, lm_report, lm_cache, current_df in executor.map(
             eval_steering_single_task, all_tasks):
@@ -354,41 +563,52 @@ def eval_steering(args):
                 all_results[concept_id][evaluator_str] = {}
                 eval_dfs[concept_id][evaluator_str] = {}
             all_results[concept_id][evaluator_str][model_str] = result
-            if "raw_relevance_concept_ratings" in result or \
+            if ("raw_relevance_concept_ratings" in result or \
                 "raw_relevance_instruction_ratings" in result or \
                 "raw_fluency_ratings" in result or \
-                "raw_aggregated_ratings" in result:
+                "raw_aggregated_ratings" in result) and evaluator_str == "LMJudgeEvaluator":
                 current_df[f"{model_str}_{evaluator_str}_relevance_concept_ratings"] = result["raw_relevance_concept_ratings"]
                 current_df[f"{model_str}_{evaluator_str}_relevance_instruction_ratings"] = result["raw_relevance_instruction_ratings"]
                 current_df[f"{model_str}_{evaluator_str}_fluency_ratings"] = result["raw_fluency_ratings"]
                 current_df[f"{model_str}_{evaluator_str}"] = result["raw_aggregated_ratings"]
                 current_df[f"{model_str}_{evaluator_str}_relevance_concept_completions"] = result["relevance_concept_completions"]
                 current_df[f"{model_str}_{evaluator_str}_relevance_instruction_completions"] = result["relevance_instruction_completions"]
-                current_df[f"{model_str}_{evaluator_str}_fluency_completions"] = result["fluency_completions"]
+                current_df[f"{model_str}_{evaluator_str}_fluency_completions"] = result["fluency_completions"]              
                 eval_dfs[concept_id][evaluator_str][model_str] = current_df.copy()
+
+            if "rule_following" in result and evaluator_str == "RuleEvaluator" and args.mode != "train_data":
+                current_df[f"{model_str}_{evaluator_str}_rule_following"] = result["raw_rule_following"]
+                eval_dfs[concept_id][evaluator_str][model_str] = current_df.copy()
+
+            elif "rule_following" in result and evaluator_str == "RuleEvaluator" and args.mode == "train_data":
+                current_df[f"{evaluator_str}_rule_following_winning"] = result["raw_rule_following_winning"]
+                current_df[f"{evaluator_str}_rule_following_losing"] = result["raw_rule_following_losing"]
+                eval_dfs[concept_id][evaluator_str][model_str] = current_df.copy()
+            
             lm_reports += [lm_report]
             lm_caches.update(lm_cache)
             logger.warning(f"Completed task for concept_id: {concept_id}, model: {model_str}, evaluator: {evaluator_str}")
 
-    # Batch save all results
+        
     for concept_id, eval_results in sorted(all_results.items()):
         save_results(
             dump_dir, 
-            {"concept_id": concept_id + 1}, 
+            {"concept_id": concept_id+1, "stanza": True}, 
             concept_id, 
             args.mode, 
             eval_results, 
             eval_dfs[concept_id]
         )
         
-    # Reload for plotting and optional winrate
-    try:
-        aggregated_results = process_jsonl_file(
-            load_jsonl(os.path.join(Path(dump_dir) / "evaluate" / f'{args.mode}.jsonl')))
-    except Exception as e:
-        logger.warning(f"Failed to load {args.mode}.jsonl: {e}. Aborting evaluation.")
-        return
 
+    if args.mode == "train_data":
+        return
+    # Reload for plotting and optional winrate
+    
+    
+    aggregated_results = process_jsonl_file(
+        load_jsonl(os.path.join(dump_dir / f'{args.mode}.jsonl')))
+   
     # Aggregate LM reports
     aggregated_lm_report = {
         "total_calls": sum([report["total_calls"] for report in lm_reports]),
@@ -403,7 +623,9 @@ def eval_steering(args):
 
     # Generate final plot
     logger.warning("Generating final plot...")
-    plot_steering(aggregated_results, Path(dump_dir) / "evaluate", args.report_to, args.wandb_name, args.mode)
+    plot_steering(aggregated_results, dump_dir, args.report_to, args.wandb_name, args.mode)
+    plot_metrics_multiple_datasets(os.path.join(dump_dir, "steering_data.parquet"), dump_dir, args.report_to, args.wandb_name, args.mode, rule = args.steer_data_type=="rule")
+    #plot_metrics_multiple_datasets(os.path.join(dump_dir, "steering_data.parquet"), dump_dir, args.report_to, args.wandb_name, args.mode, rule = args.steer_data_type=="rule")
     logger.warning("Evaluation completed!")
 
 
@@ -420,7 +642,6 @@ def load_jsonl(jsonl_path):
     
 
 def plot_latent(dump_dir, report_to=[], wandb_name=None):
-    dump_dir = Path(dump_dir) / "evaluate"
     # aggregate all results
     aggregated_results = load_jsonl(os.path.join(dump_dir, 'latent.jsonl'))
     plot_aggregated_roc(
@@ -450,27 +671,6 @@ def eval_latent(args):
         logger.warning(f"Evaluating concept_id: {concept_id}")
         
         # Initialize a dictionary for storing evaluation results for this `concept_id`
-        eval_results = {}
-        for model_name in args.models:
-            if model_name in LATENT_EXCLUDE_MODELS:
-                continue
-            for evaluator_name in args.latent_evaluators:
-                evaluator_class = getattr(axbench, evaluator_name)
-                evaluator = evaluator_class(model_name)
-                # Call each evaluator and store results
-                eval_result = evaluator.compute_metrics(current_df)
-                if evaluator.__str__() not in eval_results:
-                    eval_results[evaluator.__str__()] = {}
-                eval_results[evaluator.__str__()][model_name.__str__()] = eval_result
-        save_results(
-            dump_dir, {"concept_id": concept_id + 1}, 
-            concept_id, 'latent', eval_results, None)
-
-    # Generate final plot
-    logger.warning("Generating final plot...")
-    plot_latent(dump_dir, args.report_to, args.wandb_name)
-    logger.warning("Evaluation completed!")
-
 
 def main():
     custom_args = [
@@ -481,120 +681,30 @@ def main():
                 'default': "all",
                 'help': 'The evaluation mode.'
             }
-        }
+        },
     ]
-    args = EvalArgs(custom_args=custom_args, section="evaluate")
-    args.data_dir = f"{args.dump_dir}/inference"
+    args = EvalArgs(custom_args=custom_args, section="evaluate", ignore_unknown=True)
+    if args.mode == "train_data":
+        args.data_dir = f"{args.dump_dir}/generate" if args.overwrite_inference_dump_dir is None else Path(args.overwrite_inference_dump_dir)
+    else:
+        args.data_dir = f"{args.dump_dir}/inference" if args.overwrite_inference_dump_dir is None else Path(args.overwrite_inference_dump_dir)
     logger.warning("Evaluating generations with the following configuration:")
     logger.warning(args)
-    
-    dump_dir = Path(args.dump_dir) / "evaluate"
-    dump_dir.mkdir(parents=True, exist_ok=True)
 
-    # now = datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")
-    # start wandb logging
-    if args.report_to is not None and "wandb" in args.report_to:
-        import wandb
-        wandb_name = f"{args.dump_dir.split('/')[-1]}"
-        run = wandb.init(
-            project="AxBench", 
-            entity=f"{args.wandb_entity}",
-            name=f"{wandb_name}_{args.mode}" if args.run_name is None else f"{args.run_name}_{wandb_name}_{args.mode}",
-        )
-        
-        with open(args.config_file, 'r') as file:
-            additional_args = yaml.safe_load(file)
-            run.summary.update(additional_args)
+    dump_dir = Path(args.dump_dir) / "evaluate" if args.overwrite_evaluate_dump_dir is None else Path(args.overwrite_evaluate_dump_dir)
+
+    dump_dir.mkdir(parents=True, exist_ok=True)
+    args.dump_dir = dump_dir
 
     if args.mode == "latent":
         eval_latent(args)
     elif "steering" in args.mode: # steering or steering_test
         eval_steering(args)
+    elif args.mode == "train_data":
+        eval_steering(args)
     elif args.mode == "all":
         eval_latent(args)
         eval_steering(args)
 
-    if args.report_to is not None and "wandb" in args.report_to:
-        # log more metadata into wandb for visualization
-        if (Path(args.dump_dir) / "evaluate" / "steering.jsonl").is_file() or \
-            (Path(args.dump_dir) / "evaluate" / "latent.jsonl").is_file():
-            metadata_path = Path(args.dump_dir) / "generate" / "metadata.jsonl"
-            metadata = load_jsonl(metadata_path)
-
-        concepts = []
-        if (Path(args.dump_dir) / "evaluate" / "latent.jsonl").is_file():
-            latent_path = Path(args.dump_dir) / "evaluate" / "latent.jsonl"
-            latent_results = load_jsonl(latent_path)
-            lsreft_included = "LsReFT" in latent_results[0]["results"]["AUCROCEvaluator"]
-            top_logits_path = Path(args.dump_dir) / "inference" / "top_logits.jsonl"
-            top_logits_results = load_jsonl(top_logits_path) if os.path.exists(top_logits_path) else None
-
-            idx = 0
-            for metadata_entry in metadata:
-                concept_idx = metadata_entry["concept_id"]
-                concept = metadata_entry["concept"]
-                sae_link = metadata_entry["ref"]
-                auc = latent_results[idx]["results"]["AUCROCEvaluator"]["LsReFT"]["roc_auc"] if lsreft_included else None
-                max_act = latent_results[idx]["results"]["AUCROCEvaluator"]["LsReFT"]["max_act"] if lsreft_included else None
-                concepts += [[
-                    idx, concept, None, auc, max_act, None, sae_link
-                ]]
-                if top_logits_results is not None:
-                    top_logits = top_logits_results[idx]["results"]["LsReFT"]["top_logits"][0]
-                    neg_logits = top_logits_results[idx]["results"]["LsReFT"]["neg_logits"][0]
-                    top_table = wandb.Table(data=[(t[1], t[0] )for t in top_logits], columns=["logits", "token", ])
-                    neg_table = wandb.Table(data=[(t[1], t[0] )for t in neg_logits], columns=["logits", "token", ])
-                    wandb.log({f"positive_logits/{idx}": wandb.plot.bar(top_table, "token", "logits",
-                                                title=f"{concept} ({idx})")})
-                    wandb.log({f"negative_logits/{idx}": wandb.plot.bar(neg_table, "token", "logits",
-                                                title=f"{concept} ({idx})")})
-                idx += 1
-            
-            # log token level heatmaps
-            inference_path = Path(args.dump_dir) / "inference" / "latent_data.parquet"
-            inference_df = pd.read_parquet(inference_path)
-            if lsreft_included:
-                heatmap_html = generate_html_with_highlight_text(inference_df)
-                wandb.log({"latent/token_heatmap": wandb.Html(heatmap_html)})
-
-        if (Path(args.dump_dir) / "evaluate" / "steering.jsonl").is_file():
-            steering_path = Path(args.dump_dir) / "evaluate" / "steering.jsonl"
-            steering_results = load_jsonl(steering_path)
-            best_factors = get_best_factors(steering_results)
-            lsreft_included = "LsReFT" in steering_results[0]["results"]["WinRateEvaluator"]
-
-            idx = 0
-            for metadata_entry in metadata:
-                concept_idx = metadata_entry["concept_id"]
-                concept = metadata_entry["concept"]
-                sae_link = metadata_entry["ref"]
-                winrate = steering_results[idx]["results"]["WinRateEvaluator"]["LsReFT"]["win_rate"] if lsreft_included else None
-                best_factor = best_factors[idx]["LsReFT"] if lsreft_included else None
-                if len(concepts) <= idx:
-                    concepts += [[
-                        idx, concept, winrate, None, None, None, None
-                    ]]
-                else:
-                    concepts[idx][2] = winrate
-                    concepts[idx][5] = best_factor
-                idx += 1
-
-            # win-rate table logging
-            steering_path = Path(args.dump_dir) / "evaluate" / "winrate.parquet"
-            winrate_df = pd.read_parquet(steering_path)
-            wandb.log({
-                "steering/winrate": wandb.Table(dataframe=winrate_df)})
-        
-        if concepts is not None:
-            wandb.log({
-                "concept_table":  wandb.Table(
-                    columns=[
-                        "concept_id", "concept", "winrate", "auc", 
-                        "max_act", "best_factor", "sae_link"], data=concepts)})
-
-        run.finish()
-
-
 if __name__ == "__main__":
     main()
-

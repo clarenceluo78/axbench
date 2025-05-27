@@ -1,4 +1,4 @@
-import os, glob, random, json, wandb
+import os, glob, random, json
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy import interpolate
@@ -6,28 +6,24 @@ from sklearn.metrics import auc
 from matplotlib.colors import hsv_to_rgb
 import seaborn as sns
 import pandas as pd
-from pathlib import Path
-from plotnine import (
-    ggplot, aes, geom_line, geom_point, facet_wrap, geom_bar, geom_abline, xlim, scale_fill_manual,
-    geom_text, position_dodge, ylim, labs, theme_bw, theme, element_text, scale_color_manual, coord_flip
-)
+from pathlib import Path                        
+import numpy as np
+import argparse
+import pickle
+from plotnine import *
+import json
+import pandas as pd
+import os
+import matplotlib.font_manager as fm
+from matplotlib import rcParams
+import itertools
+import numpy as np
+from scipy.stats import bootstrap, ttest_rel
+from collections import defaultdict, Counter
+import glob
 
-
-# Predefined color and marker sequences for consistency
-COLORS = [
-    '#1f77b4',  # blue
-    '#ff7f0e',  # orange
-    '#2ca02c',  # green
-    '#d62728',  # red
-    '#9467bd',  # purple
-    '#8c564b',  # brown
-    '#e377c2',  # pink
-    '#7f7f7f',  # gray
-    '#bcbd22',  # olive
-    '#17becf'   # cyan
-]
-
-MARKERS = ['o', 's', '^', 'D', 'v', '<', '>', 'p', '*', 'h']
+from tqdm import tqdm
+import random
 
 
 def plot_aggregated_roc(jsonl_data, write_to_path=None, report_to=[], wandb_name=None):
@@ -98,6 +94,7 @@ def plot_aggregated_roc(jsonl_data, write_to_path=None, report_to=[], wandb_name
 
     # Report to wandb if wandb_name is provided
     if report_to is not None and "wandb" in report_to:
+        import wandb
         # Prepare data for wandb.plot.line_series
         xs = common_fpr.tolist()
         ys = [np.mean(tprs[model], axis=0).tolist() for model in tprs]
@@ -178,6 +175,7 @@ def plot_metrics(jsonl_data, configs, write_to_path=None, report_to=[], wandb_na
 
     # Report to wandb if wandb_name is provided
     if report_to is not None and "wandb" in report_to:
+        import wandb
         # Separate data by metrics to prepare for wandb line series plotting
         line_series_plots = {}
         for metric in df['Metric'].unique():
@@ -195,6 +193,335 @@ def plot_metrics(jsonl_data, configs, write_to_path=None, report_to=[], wandb_na
                 xname='Factor'
             )
         wandb.log(line_series_plots)
+
+def plot_metrics_multiple_datasets(data_path, write_to_path=None, report_to=[], wandb_name=None, mode=None, rule=True):
+    # Collect data into a list
+    df = pd.read_parquet(data_path)
+
+    for method in [a.split('_')[0] for a in list(df.columns) if "LMJudgeEvaluator_relevance_concept_ratings" in a]:
+        col = method + '_LMJudgeEvaluator_relevance_concept_ratings'
+        norm_col = method + '_normalized_LMJudgeEvaluator_relevance_concept_ratings'
+        df[norm_col] = [0 for _ in range(len(df))]
+        for dataset in df['dataset_name'].unique():
+            mask_dataset = (df['dataset_name'] == dataset)
+            for concept_id in df.loc[mask_dataset, 'concept_id'].unique():
+                mask_concept = mask_dataset & (df['concept_id'] == concept_id)
+                for input_id in df.loc[mask_concept, 'input_id'].unique():
+                    mask_input = mask_concept & (df['input_id'] == input_id)
+                    mask_minus2 = mask_input & (df['factor'] == -2)
+                    if mask_minus2.any():
+                        base_val = 2-df.loc[mask_minus2, col].values[0]
+                        val = (2 - df.loc[mask_input, col]) - base_val
+                        val = val.clip(lower=0)
+                        df.loc[mask_input, norm_col] = val
+
+
+    # Compute harmonic mean for normalized LMJudgeEvaluator metrics and store in new column
+    for method in [a[:len(a)-len("_LMJudgeEvaluator_relevance_concept_ratings")] for a in list(df.columns) if "LMJudgeEvaluator_relevance_concept_ratings" in a]:
+        norm_concept_col = method + '_normalized_LMJudgeEvaluator_relevance_concept_ratings'
+        instr_col = method + '_LMJudgeEvaluator_relevance_instruction_ratings'
+        fluency_col = method + '_LMJudgeEvaluator_fluency_ratings'
+        new_col = method + '_normalized_LMJudgeEvaluator'
+        def safe_hmean(row):
+            vals = [row.get(norm_concept_col, 0), row.get(instr_col, 0), row.get(fluency_col, 0)]
+            if 0 in vals:
+                return 0
+            hmean = 3 / sum(1/v for v in vals)
+            return hmean if hmean >= 0 else 0
+        df[new_col] = df.apply(safe_hmean, axis=1)
+
+    def harmonic_mean(scores):
+        # Return 0 if any score is 0 to maintain strict evaluation
+        if 0 in scores:
+            return 0
+        return len(scores) / sum(1/s for s in scores)
+
+    methods = [a[:len(a)-len("_normalized_LMJudgeEvaluator_relevance_concept_ratings")] for a in list(df.columns) if "LMJudgeEvaluator_relevance_concept_ratings" in a]
+
+
+    # Metrics to plot
+    if not rule:
+        metrics = ['_normalized_LMJudgeEvaluator',
+                '_normalized_LMJudgeEvaluator_relevance_concept_ratings', 
+                '_LMJudgeEvaluator_relevance_instruction_ratings', 
+                '_LMJudgeEvaluator_fluency_ratings']
+        metrics_names = ['Normalized Overall', 'Normalized Relevance Concept', 'Relevance Instruction', 'Fluency']
+    
+    else:
+       
+        metrics = [
+                '_RuleEvaluator',
+                '_RuleEvaluator_rule_following', 
+                '_LMJudgeEvaluator_relevance_instruction_ratings', 
+                '_LMJudgeEvaluator_fluency_ratings']
+        metrics_names = ['Overall', 'Rule Following', 'Relevance Instruction', 'Fluency']
+    
+    
+    
+    # Prepare data for plotting
+    plot_data = []
+    datasets = df['dataset_name'].unique()
+    # For each dataset, calculate average metrics for each factor
+    for dataset in datasets:
+        dataset_data = df[df['dataset_name'] == dataset]     
+        # Group by method and factor, then calculate mean for each metric
+        for method in methods:
+            if 'PromptSteering' in method:
+                # For PromptSteering, average across all factors
+                # Calculate average for each metric
+                for idx, metric in enumerate(metrics):
+                    if method + metric in dataset_data.columns:
+                        avg_value = dataset_data[method + metric].mean()
+                        # Add same average value for each factor to create a straight line
+                        for factor in dataset_data['factor'].unique():
+                            plot_data.append({
+                                'Dataset': dataset,
+                                'Method': method,
+                                'Factor': factor,
+                                'Metric': metrics_names[idx],
+                                'Value': avg_value
+                            })
+            else:
+                # For other methods, keep factor-wise values
+                for factor in dataset_data['factor'].unique():
+                    factor_data = dataset_data[dataset_data['factor'] == factor]
+                    # Calculate average for each metric
+                    for idx, metric in enumerate(metrics):
+                        if method + metric in factor_data.columns:
+                            #if metric == '_LMJudgeEvaluator_relevance_concept_ratings' and "Suppress" in dataset:
+                            #    df[method+metrics] = df[method+metrics].apply(lambda x: 2-x)                  
+                            avg_value = factor_data[method + metric].mean()
+                            plot_data.append({
+                                'Dataset': dataset,
+                                'Method': method,
+                                'Factor': factor,
+                                'Metric': metrics_names[idx],
+                                'Value': avg_value
+                            })
+    
+    # Create DataFrame for plotting
+    plot_df = pd.DataFrame(plot_data)
+    
+    # Ensure metrics are displayed in the correct order by creating a categorical variable
+    plot_df['Metric'] = pd.Categorical(plot_df['Metric'], categories=metrics_names, ordered=True)
+    
+    # Create a plot for each dataset
+    num_datasets = len(datasets)
+    
+
+    # Get unique combinations of Dataset and Metric
+    unique_combinations = plot_df[['Dataset', 'Metric']].drop_duplicates()
+    num_combinations = len(unique_combinations)
+
+    # Calculate grid dimensions
+    ncols = 4
+    nrows = int(np.ceil(num_combinations / ncols))
+
+    # Create figure with subplots
+    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(16, 4 * nrows))
+    axes = axes.flatten()
+
+    # Get unique methods for color mapping
+    unique_methods = plot_df['Method'].unique()
+    colors = plt.cm.tab10(np.linspace(0, 1, len(unique_methods)))
+    method_colors = dict(zip(unique_methods, colors))
+
+    # Plot each combination
+    for idx, (dataset, metric) in enumerate(unique_combinations.values):
+        ax = axes[idx]
+        subset = plot_df[(plot_df['Dataset'] == dataset) & (plot_df['Metric'] == metric)]
+        
+        # Plot each method
+        for method in unique_methods:
+            method_data = subset[subset['Method'] == method]
+            if not method_data.empty:
+                ax.plot(method_data['Factor'], method_data['Value'], 
+                    color=method_colors[method], label=method, marker='o')
+        
+        ax.set_title(f'{metric}')
+        ax.set_xlabel('Factor')
+        ax.set_ylabel('Score')
+        ax.grid(True, alpha=0.3)
+        ax.tick_params(axis='x', rotation=45)
+
+    # Add legend to the last subplot
+    handles, labels = ax.get_legend_handles_labels()
+    fig.legend(handles, labels, loc='center right', bbox_to_anchor=(1.0, 0.5))
+
+    # Adjust layout
+    plt.tight_layout()
+
+    # Save or show the plot
+    if write_to_path:
+        plt.savefig(str(write_to_path / f"{mode}_combined_plot.png"), dpi=300, bbox_inches='tight')
+    else:
+        plt.show()
+
+    plt.close()
+
+    return fig 
+
+
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+import numpy as np
+import pandas as pd
+from pathlib import Path
+
+# Define a better color palette - using colorblind-friendly colors with more distinct blues
+COLORS = {
+    'PreferenceVector': '#404040',              # Dark gray
+    'PromptSteering_prepend_original': '#00BFFF', # Deep sky blue
+    'PromptSteering_prepend_rewrite': '#0000CD',  # Medium blue
+    'PromptSteering_append_original': '#DA70D6',  # Orchid
+    'PromptSteering_append_rewrite': '#F15C5C'    # Salmon red
+}
+
+def get_nshot_one_df(data_path, write_to_path=None, report_to=[], wandb_name=None, mode=None, rule=True):
+    df = pd.read_parquet(data_path)   
+    # Extract shot numbers from dataset names
+    df['n_shots'] = df['input'].str.count('Question')  
+    methods = [a[:len(a)-len("_LMJudgeEvaluator_relevance_concept_ratings")] for a in list(df.columns) if "LMJudgeEvaluator_relevance_concept_ratings" in a]
+
+    # Metrics to plot
+    if not rule:
+        metrics = ['_LMJudgeEvaluator',
+                '_LMJudgeEvaluator_relevance_concept_ratings', 
+                '_LMJudgeEvaluator_relevance_instruction_ratings', 
+                '_LMJudgeEvaluator_fluency_ratings']
+        metrics_names = ['Overall', 'Adherence to System Prompt', 'Relevance Instruction', 'Fluency']
+    
+    else:
+        metrics = [
+                '_RuleEvaluator',
+                '_RuleEvaluator_rule_following', 
+                '_LMJudgeEvaluator_relevance_instruction_ratings', 
+                '_LMJudgeEvaluator_fluency_ratings']
+        metrics_names = ['Overall', 'Adherence to System Prompt', 'Relevance Instruction', 'Fluency']    
+    
+    # Prepare data for plotting
+    plot_data = []
+    
+    # Calculate average metrics for each method and number of shots
+    for method in methods:
+        for n_shots in df['n_shots'].unique():
+            shots_data = df[df['n_shots'] == n_shots]
+            # Calculate average for each metric
+            for idx, metric in enumerate(metrics):
+                if method + metric in shots_data.columns:
+                    avg_value = shots_data[method + metric].mean()
+                    if "_RuleEvaluator_rule_following" in metric:
+                        avg_value = 2 - avg_value
+                    plot_data.append({
+                        "Dataset": "AttackMultiShot",
+                        'n_shots': n_shots,
+                        'Method': method,
+                        'Metric': metrics_names[idx],
+                        'Value': avg_value
+                    })
+    return plot_data
+    
+def plot_nshot_metrics(data_paths, write_to_path=None, report_to=[], wandb_name=None, mode=None, rule=True):
+    """
+    Create an n-shot metrics plot with confidence intervals, similar to the style in analyse.ipynb.
+    Only shows the "Overall" metric.
+    """
+    plot_data = []
+    for data_path in data_paths:
+        plot_data.extend(get_nshot_one_df(data_path, write_to_path, report_to, wandb_name, mode, rule))
+ 
+    # Create DataFrame for plotting
+    plot_df = pd.DataFrame(plot_data)
+    
+    # Sort by number of shots to ensure proper ordering on x-axis
+    plot_df = plot_df.sort_values('n_shots')
+    
+    # Debug: print unique n_shots values
+    print(f"Unique n_shots values: {sorted(plot_df['n_shots'].unique())}")
+    print(f"Data shape: {plot_df.shape}")
+    print(f"Value range: {plot_df['Value'].min()} to {plot_df['Value'].max()}")
+    
+    # Convert n_shots to string for discrete treatment if there are few unique values
+    unique_shots = sorted(plot_df['n_shots'].unique())
+    if len(unique_shots) <= 10:  # Treat as discrete if 10 or fewer unique values
+        plot_df['n_shots_str'] = plot_df['n_shots'].astype(str)
+        x_var = 'n_shots_str'
+    else:
+        x_var = 'n_shots'
+    
+    # Get unique methods for color mapping
+    unique_methods = sorted(plot_df['Method'].unique())
+    
+    # Define the preferred order of methods (for legend)
+    method_order = [
+        'PromptSteering_prepend_original',
+        'PromptSteering_prepend_rewrite',
+        'PromptSteering_append_original',
+        'PromptSteering_append_rewrite',
+        'PreferenceVector'
+    ]
+    
+    # Filter to only include methods that are actually in the data
+    method_order = [m for m in method_order if m in unique_methods]
+    
+    # Create method labels for better readability
+    method_labels = {method: method.replace('_', ' ') for method in unique_methods}
+    plot_df['method_label'] = plot_df['Method'].map(method_labels)
+    
+    # Keep only the 'Overall' metric for plotting
+    plot_df = plot_df[plot_df['Metric'] == 'Overall']
+    
+    # Create the color scale using the global COLORS dictionary
+    method_colors = {method: COLORS.get(method, "#333333") for method in unique_methods}
+    
+    # Create the plot using plotnine - similar to analyse.ipynb style
+    plot = (
+        ggplot(plot_df, aes(x=x_var, y='Value', color='Method', group='Method')) +
+        stat_summary(fun_data="mean_cl_boot", geom="errorbar", width=0.2, alpha=0.7) +
+        stat_summary(fun_data="mean_cl_boot", geom="line") +
+        stat_summary(fun_data="mean_cl_boot", geom="point") +
+        labs(
+            x='Number of Shots',
+            y='Overall Score',
+            title='Effect of Number of Shots on Overall Performance'
+        ) +
+        scale_color_manual(values=method_colors)
+    )
+    
+    # If using discrete x-axis, adjust the plot
+    if x_var == 'n_shots_str':
+        plot = plot + scale_x_discrete()
+    else:
+        # Check if log scale might be appropriate (if values span more than one order of magnitude)
+        min_val = min(unique_shots)
+        max_val = max(unique_shots)
+        plot = plot + scale_x_continuous(
+            breaks=sorted(plot_df['n_shots'].unique()),
+            limits=(plot_df['n_shots'].min() - 0.5, plot_df['n_shots'].max() + 0.5)
+        )
+    
+    # Apply theme similar to analyse.ipynb but with simpler legend settings
+    plot = plot + theme_bw() + theme(
+        text=element_text(family="sans-serif"),
+        plot_title=element_text(size=14, hjust=0.5),
+        axis_title=element_text(size=12),
+        axis_text=element_text(size=10),
+        legend_position="bottom",
+        legend_title=element_blank(),
+        panel_grid_minor=element_blank(),
+        panel_border=element_rect(fill=None, color="black", size=0.5),
+        figure_size=(8, 6)
+    )
+    
+    # Save or show the plot
+    if write_to_path:
+        output_path = Path(write_to_path) / f"{mode}_n_shot_plot.pdf"
+        plot.save(str(output_path), dpi=300)
+        print(f"Plot saved to {output_path}")
+    else:
+        print(plot)
+    
+    return plot
 
 
 def plot_accuracy_bars(jsonl_data, evaluator_name, write_to_path=None, report_to=[], wandb_name=None):
@@ -255,6 +582,7 @@ def plot_accuracy_bars(jsonl_data, evaluator_name, write_to_path=None, report_to
         print(p)
 
     if report_to is not None and "wandb" in report_to:
+        import wandb
         wandb.log({"latent/macro_avg_accuracy_incl_hard_neg": wandb.Image(str(write_to_path / "macro_avg_accuracy_incl_hard_neg.png"))})
 
 
@@ -400,5 +728,211 @@ def plot_win_rates(jsonl_data, write_to_path=None, report_to=[], wandb_name=None
         print(p)
     
     if report_to is not None and "wandb" in report_to:
+        import wandb
         wandb.log({"steering/winrate_plot": wandb.Image(str(write_to_path / "winrate_plot.png"))})
 
+
+def plot_best_factor_scores(data_path, write_to_path=None, report_to=[], wandb_name=None, mode=None, rule=True):
+    # Read the data
+    df = pd.read_parquet(data_path)
+    
+    def harmonic_mean(scores):
+        # Return 0 if any score is 0 to maintain strict evaluation
+        if 0 in scores:
+            return 0
+        return len(scores) / sum(1/s for s in scores)
+    
+    methods = [a[:len(a)-len("_LMJudgeEvaluator_relevance_concept_ratings")] for a in list(df.columns) if "LMJudgeEvaluator_relevance_concept_ratings" in a]
+    df = df[df['dataset_name'] == 'AlpacaEvalSuppress']
+
+    # Metrics to plot
+    if not rule:
+        metrics = ['_LMJudgeEvaluator',
+                '_LMJudgeEvaluator_relevance_concept_ratings', 
+                '_LMJudgeEvaluator_relevance_instruction_ratings', 
+                '_LMJudgeEvaluator_fluency_ratings']
+        metrics_names = ['Overall', 'Relevance Concept', 'Relevance Instruction', 'Fluency']
+    else:
+        # Calculate harmonic mean for each method and add as a new column
+       
+        metrics = [
+                '_RuleEvaluator',
+                '_RuleEvaluator_rule_following', 
+                '_LMJudgeEvaluator_relevance_instruction_ratings', 
+                '_LMJudgeEvaluator_fluency_ratings']
+        metrics_names = ['Overall', 'Rule Following', 'Relevance Instruction', 'Fluency']
+    
+    # Get all concepts
+    concepts = df['concept_id'].unique()
+    
+    # Store best scores for each concept
+    best_scores = []
+    
+    # For each concept, split data and find best factor
+    for concept in concepts:
+        concept_data = df[df['concept_id'] == concept]
+        
+        # Get indices for this concept's data
+        indices = concept_data.index.values
+        
+        # Randomly split indices into train and test
+        np.random.seed(41)  # for reproducibility
+        train_indices = np.random.choice(indices, size=len(indices)//2, replace=False)
+        test_indices = np.array([idx for idx in indices if idx not in train_indices])
+        
+        # Split data
+        train_data = concept_data.loc[train_indices]
+        test_data = concept_data.loc[test_indices]
+        
+        # Find the factor that gives max RuleEvaluator score on train data
+        train_rule_scores = train_data['PreferenceVector_RuleEvaluator']
+        best_factor = train_data.loc[train_rule_scores.idxmax(), 'factor']
+        
+        # Get scores for the best factor using test data
+        test_factor_data = test_data[test_data['factor'] == best_factor]
+        
+        if len(test_factor_data) > 0:  # Only add if we have test data for this factor
+            # Get all metrics for this best factor using mean of test data
+            metrics_data = {
+                'Concept': f'Concept {concept}',
+                'Factor': best_factor,
+                'Overall': test_factor_data['PreferenceVector_RuleEvaluator'].mean(),
+                'Rule Following':  test_factor_data['PreferenceVector_RuleEvaluator_rule_following'].mean(),
+                'Relevance': test_factor_data['PreferenceVector_LMJudgeEvaluator_relevance_instruction_ratings'].mean(),
+                'Fluency': test_factor_data['PreferenceVector_LMJudgeEvaluator_fluency_ratings'].mean()
+            }
+            best_scores.append(metrics_data)
+    
+    # Create DataFrame with best scores
+    best_scores_df = pd.DataFrame(best_scores)
+    
+    # Print the selected factors and their frequencies
+    factor_counts = best_scores_df['Factor'].value_counts()
+    print("\nSelected Factors Distribution:")
+    print(factor_counts)
+    
+    # Melt the DataFrame for plotting
+    plot_df = pd.melt(best_scores_df, 
+                      id_vars=['Concept', 'Factor'],
+                      value_vars=['Overall', 'Rule Following', 'Relevance', 'Fluency'],
+                      var_name='Metric',
+                      value_name='Score')
+
+    
+    # Print summary statistics
+    print("\nSummary Statistics for Test Set Scores:")
+    summary_stats = plot_df.groupby('Metric')['Score'].agg(['mean', 'std', 'min', 'max'])
+    print(summary_stats)
+    
+    return p
+
+
+
+def plot_best_factor_scores_all(data_path, write_to_path=None, report_to=[], wandb_name=None, mode=None, rule=True):
+    # Read the data
+    df = pd.read_parquet(data_path)
+    
+    def harmonic_mean(scores):
+        # Return 0 if any score is 0 to maintain strict evaluation
+        if 0 in scores:
+            return 0
+        return len(scores) / sum(1/s for s in scores)
+    
+    methods = [a[:len(a)-len("_LMJudgeEvaluator_relevance_concept_ratings")] for a in list(df.columns) if "LMJudgeEvaluator_relevance_concept_ratings" in a]
+
+    # Metrics to plot
+    if not rule:
+        metrics = ['_LMJudgeEvaluator',
+                '_LMJudgeEvaluator_relevance_concept_ratings', 
+                '_LMJudgeEvaluator_relevance_instruction_ratings', 
+                '_LMJudgeEvaluator_fluency_ratings']
+        metrics_names = ['Overall', 'Relevance Concept', 'Relevance Instruction', 'Fluency']
+    else:
+        # Calculate harmonic mean for each method and add as a new column
+        for method in methods:
+            rule_metric = method + '_RuleEvaluator_rule_following'
+            instruction_metric = method + '_LMJudgeEvaluator_relevance_instruction_ratings'
+            fluency_metric = method + '_LMJudgeEvaluator_fluency_ratings'
+            
+            # Create a new column for the harmonic mean
+            df[method + '_RuleEvaluator'] = df.apply(
+                lambda row: harmonic_mean([
+                    row[rule_metric] if ('dataset_name' in df.columns and row['dataset_name'] == 'AlpacaEval' and rule_metric in df.columns and not pd.isna(row[rule_metric])) 
+                    else (2-row[rule_metric] if rule_metric in df.columns and not pd.isna(row[rule_metric]) else 0),
+                    row[instruction_metric] if instruction_metric in df.columns and not pd.isna(row[instruction_metric]) else 0,
+                    row[fluency_metric] if fluency_metric in df.columns and not pd.isna(row[fluency_metric]) else 0
+                ]),
+                axis=1
+            )
+            print(f"Scores for {method}:")
+            print(df[method + '_RuleEvaluator'])
+       
+        metrics = [
+                '_RuleEvaluator',
+                '_RuleEvaluator_rule_following', 
+                '_LMJudgeEvaluator_relevance_instruction_ratings', 
+                '_LMJudgeEvaluator_fluency_ratings']
+        metrics_names = ['Overall', 'Rule Following', 'Relevance Instruction', 'Fluency']
+    
+    # Get all concepts
+    concepts = df['concept_id'].unique()
+    
+    # Store best scores for each concept
+    best_scores = []
+    
+    # For each concept, find best factor using all data
+    for concept in concepts:
+        concept_data = df[df['concept_id'] == concept]
+        
+        # Find the factor that gives max RuleEvaluator score
+        rule_scores = concept_data.groupby('factor')['PreferenceVector_RuleEvaluator'].mean()
+        best_factor = rule_scores.idxmax()
+        
+        # Get scores for the best factor
+        best_factor_data = concept_data[concept_data['factor'] == best_factor]
+        
+        # Get all metrics for this best factor
+        metrics_data = {
+            'Concept': f'Concept {concept}',
+            'Factor': best_factor,
+            'Overall': best_factor_data['PreferenceVector_RuleEvaluator'].mean(),
+            'Rule Following': best_factor_data['PreferenceVector_RuleEvaluator_rule_following'].mean(),
+            'Relevance': best_factor_data['PreferenceVector_LMJudgeEvaluator_relevance_instruction_ratings'].mean(),
+            'Fluency': best_factor_data['PreferenceVector_LMJudgeEvaluator_fluency_ratings'].mean()
+        }
+        best_scores.append(metrics_data)
+    
+    # Create DataFrame with best scores
+    best_scores_df = pd.DataFrame(best_scores)
+
+    concept_list = []
+    
+        # Print detailed statistics for each concept
+    print("\nDetailed Statistics for Each Concept:")
+    for concept in best_scores_df['Concept'].unique():
+        concept_data = best_scores_df[best_scores_df['Concept'] == concept]
+        print(f"\n{concept}:")
+        print(f"Selected Factor: {concept_data['Factor'].iloc[0]}")
+        print("Metrics:")
+        for metric in ['Overall', 'Rule Following', 'Relevance', 'Fluency']:
+            print(f"  {metric}: {concept_data[metric].iloc[0]:.4f}")
+        concept_list.append(concept_data['Factor'].iloc[0] * -1)
+            
+    # Print the selected factors and their frequencies
+    factor_counts = best_scores_df['Factor'].value_counts()
+    print("\nSelected Factors Distribution:")
+    print(factor_counts)
+    print(concept_list)
+    
+    # Melt the DataFrame for plotting
+    plot_df = pd.melt(best_scores_df, 
+                      id_vars=['Concept', 'Factor'],
+                      value_vars=['Overall', 'Rule Following', 'Relevance', 'Fluency'],
+                      var_name='Metric',
+                      value_name='Score')
+    
+   
+    # Print summary statistics
+    print("\nSummary Statistics for Scores:")
+    summary_stats = plot_df.groupby('Metric')['Score'].agg(['mean', 'std', 'min', 'max'])
+    print(summary_stats)

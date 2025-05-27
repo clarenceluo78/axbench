@@ -264,7 +264,7 @@ async def response_with(client, tokenizer, content, length, api_tag=""):
     return response_content
 
 
-async def response_with_concept(client, tokenizer, concepts, content, length, api_tag=""):
+async def response_with_concept(client, tokenizer, concepts, content, length=None, api_tag=""):
     prompts = []
     content_token_lengths = []
     for i, c in enumerate(content):
@@ -273,6 +273,9 @@ async def response_with_concept(client, tokenizer, concepts, content, length, ap
         prompts += [T_RESPONSE_WITH_CONCEPT.format(
             INSTRUCTION=c, CONCEPT=concepts[i])]
     responses = await client.chat_completions(f"{api_tag}.response_with_concept", prompts)
+    if length is None:
+        return [response.strip() for response in responses]
+
     response_content = []
     for i, response in enumerate(responses):
         full_tokens = tokenizer.tokenize(response.strip(" '").strip('"'))
@@ -283,7 +286,7 @@ async def response_with_concept(client, tokenizer, concepts, content, length, ap
     return response_content
 
 
-async def response_without_concept(client, tokenizer, concepts, content, length, api_tag=""):
+async def response_without_concept(client, tokenizer, concepts, content, length=None, api_tag=""):
     prompts = []
     content_token_lengths = []
     for i, c in enumerate(content):
@@ -292,6 +295,9 @@ async def response_without_concept(client, tokenizer, concepts, content, length,
         prompts += [T_RESPONSE_WITHOUT_CONCEPT.format(
             INSTRUCTION=c, CONCEPT=concepts[i])]
     responses = await client.chat_completions(f"{api_tag}.response_without_concept", prompts)
+    if length is None:
+        return [response.strip() for response in responses]
+
     response_content = []
     for i, response in enumerate(responses):
         full_tokens = tokenizer.tokenize(response.strip(" '").strip('"'))
@@ -320,3 +326,40 @@ async def response_with_polysemantic_concepts(
                     pattern.sub('', response).strip(" .'").strip('"')
                 )[:int(length)])
             for response in responses]))
+
+
+async def get_steering_prompts(client, concepts):
+    prompts = []
+    for concept in concepts:
+        prompts += [T_GENERATE_PREPEND_STEERING_PROMPT.format(
+                CONCEPT=concept)]
+    responses = await client.chat_completions("get_steering_prompts", prompts)
+    return responses
+
+
+async def get_dpo_steering_prompt(
+        client, instructions, concept, use_simple=False, api_tag=""):
+    prompts = []
+    for i, instruction in enumerate(instructions):
+        if use_simple:
+            prompts += [T_GENERATE_PREPEND_STEERING_PROMPT.format(
+                CONCEPT=concept)]
+        else:
+            prompts += [T_GENERATE_BLEND_IN_STEERING_PROMPT.format(
+                CONCEPT=concept, INSTRUCTION=instruction)]
+    responses = await client.chat_completions(f"{api_tag}.get_dpo_steering_prompt", prompts)
+    return responses
+
+
+async def get_dpo_steering_prompt_rule(
+        client, instructions, concept, use_simple=False, api_tag=""):
+    prompts = []
+    for i, instruction in enumerate(instructions):
+        if use_simple:
+            prompts += [T_GENERATE_PREPEND_STEERING_PROMPT_RULE.format(
+                CONCEPT=concept)]
+        else:
+            prompts += [T_GENERATE_BLEND_IN_STEERING_PROMPT_RULE.format(
+                CONCEPT=concept, INSTRUCTION=instruction)]
+    responses = await client.chat_completions(f"{api_tag}.get_dpo_steering_prompt", prompts)
+    return responses

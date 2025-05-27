@@ -9,6 +9,7 @@ generate:
   dataset_category: "instruction"
   master_data_dir: "axbench/data"
   seed: 42
+  keep_orig_axbench_format: true
 
 train:
   model_name: "google/gemma-2-2b-it"

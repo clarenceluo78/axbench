@@ -17,6 +17,7 @@ class LMJudgeEvaluator(Evaluator):
         self.model_name = model_name
         self.lm_model = kwargs.get("lm_model", None)
         self.concept_id = kwargs.get("concept_id", None)
+        self.steer_dataset_type = kwargs.get("steer_dataset_type", None)
 
     def __str__(self):
         return 'LMJudgeEvaluator'
@@ -52,7 +53,7 @@ class LMJudgeEvaluator(Evaluator):
     def _get_ratings_from_prompts(self, prompts, api_name, min_rating=0.0, max_rating=2.0):
         async def process_batch():
             return await self.lm_model.chat_completions(
-                f"{api_name}_{self.model_name}_LMJudgeEvaluator", prompts, batch_size=32
+                f"{api_name}_{self.model_name}_LMJudgeEvaluator", prompts, batch_size=16
             )
 
         # If we're already in an event loop, use that
@@ -63,8 +64,10 @@ class LMJudgeEvaluator(Evaluator):
         model_relevance_concept_prompts = []
         model_relevance_instruction_prompts = []
         model_fluency_prompts = []
+        dataset_names = []
         # This is a generation dataset.
         for idx, row in data.iterrows():
+            dataset_name = row["dataset_name"]
             input_concept = row["input_concept"]
             original_prompt = row["original_prompt"]
             generation = row[f"{column_name}_steered_generation"]
@@ -72,6 +75,7 @@ class LMJudgeEvaluator(Evaluator):
                 concept=input_concept,
                 sentence=generation
             )]
+                
             model_relevance_instruction_prompts += [UNIDIRECTIONAL_PAIRWISE_EVALUATION_INSTRUCTION_RELEVANCE_TEMPLATE.format(
                 instruction=original_prompt,
                 sentence=generation
@@ -79,6 +83,7 @@ class LMJudgeEvaluator(Evaluator):
             model_fluency_prompts += [UNIDIRECTIONAL_PAIRWISE_EVALUATION_FLUENCY_TEMPLATE.format(
                 sentence=generation
             )]
+            dataset_names += [dataset_name]
         model_relevance_concept_ratings, model_relevance_concept_completions = \
             self._get_ratings_from_prompts(model_relevance_concept_prompts, f"{column_name}_concept")
         model_relevance_instruction_ratings, model_relevance_instruction_completions = \
@@ -88,7 +93,7 @@ class LMJudgeEvaluator(Evaluator):
         return list(zip(model_relevance_concept_prompts, model_relevance_concept_ratings)), \
                list(zip(model_relevance_instruction_prompts, model_relevance_instruction_ratings)), \
                list(zip(model_fluency_prompts, model_fluency_ratings)), \
-               model_relevance_concept_completions, model_relevance_instruction_completions, model_fluency_completions
+               model_relevance_concept_completions, model_relevance_instruction_completions, model_fluency_completions, dataset_names
 
     def compute_metrics(self, data, write_to_dir=None):
         """
@@ -107,7 +112,7 @@ class LMJudgeEvaluator(Evaluator):
         data_copy = data.copy()
         
         model_relevance_concept_ratings, model_relevance_instruction_ratings, model_fluency_ratings, \
-            model_relevance_concept_completions, model_relevance_instruction_completions, model_fluency_completions = \
+            model_relevance_concept_completions, model_relevance_instruction_completions, model_fluency_completions, dataset_names = \
             self._get_all_ratings_from_data(data_copy, self.model_name)
         
         all_relevance_concept_ratings = []
@@ -125,12 +130,19 @@ class LMJudgeEvaluator(Evaluator):
                 if 0 in scores:
                     return 0
                 return len(scores) / sum(1/s for s in scores)
-
-            model_scores = [
-                model_relevance_concept_ratings[i][-1],
-                model_relevance_instruction_ratings[i][-1],
-                model_fluency_ratings[i][-1]
-            ]
+            if dataset_names[i] == "AlpacaEvalSuppress":
+                model_scores = [
+                    2-model_relevance_concept_ratings[i][-1],
+                    model_relevance_instruction_ratings[i][-1],
+                    model_fluency_ratings[i][-1]
+                ]
+            else:
+                model_scores = [
+                    model_relevance_concept_ratings[i][-1],
+                    model_relevance_instruction_ratings[i][-1],
+                    model_fluency_ratings[i][-1]
+                ]
+                
             model_score = harmonic_mean(model_scores)
             all_aggregated_ratings += [model_score]
 
