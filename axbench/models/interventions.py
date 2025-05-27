@@ -187,6 +187,73 @@ class AdditionIntervention(
         return output
     
 
+class AdditionSuppressionIntervention(
+    SourcelessIntervention,
+    TrainableIntervention, 
+    DistributedRepresentationIntervention
+):
+    def __init__(self, **kwargs):
+        # Note that we initialise these to zeros because we're loading in pre-trained weights.
+        # If you want to train your own SAEs then we recommend using blah
+        super().__init__(**kwargs, keep_last_dim=True)
+        self.proj = torch.nn.Linear(
+                self.embed_dim, kwargs["low_rank_dimension"], bias=True)
+        self.bias = nn.Parameter(torch.zeros(kwargs["low_rank_dimension"]))
+        ## also add on bias
+
+    def forward(self, base, source=None, subspaces=None):
+        # use subspaces["idx"] to select the correct weight vector
+        steering_vec = self.proj.weight[subspaces["idx"]]
+
+        neg_mask = subspaces["mag"] <= 0 # bs, 1, 1, this is only for null it out training #this is when applying suppression
+        pos_mask = subspaces["mag"] >= 0.0 # bs, 1, 1 # this is when applying steering
+
+        #neg_mask = torch.einsum("bsq, b->bsq", latent, neg_mask) # bs, s, 1 * bs, 1, 1 = bs, s, 1  
+        # When zero_mask is 1, multiply neg_steering_factor by subspaces["mag"]
+        neg_steering_factor = torch.einsum("b, b->b", (subspaces["mag"] - self.proj.bias[subspaces["idx"]]), neg_mask) # bs, s
+        pos_steering_factor = torch.einsum("b, b->b", (subspaces["mag"] + self.proj.bias[subspaces["idx"]]), pos_mask) # bs, 1
+        combined_steering_factor = neg_steering_factor + pos_steering_factor # bs, s
+        steering_vec = torch.einsum("bs, b->bs", steering_vec, combined_steering_factor) # bs, s, d
+        output = base + steering_vec.unsqueeze(dim=1)
+        return output
+
+
+class AdditionSuppressionLongContextIntervention(
+    SourcelessIntervention,
+    TrainableIntervention, 
+    DistributedRepresentationIntervention
+):
+    def __init__(self, **kwargs):
+        # Note that we initialise these to zeros because we're loading in pre-trained weights.
+        # If you want to train your own SAEs then we recommend using blah
+        super().__init__(**kwargs, keep_last_dim=True)
+        self.proj = torch.nn.Linear(
+                self.embed_dim, kwargs["low_rank_dimension"], bias=True)
+        self.bias = nn.Parameter(torch.zeros(kwargs["low_rank_dimension"]))
+        ## also add on bias
+
+    def forward(self, base, source=None, subspaces=None):
+        # use subspaces["idx"] to select the correct weight vector
+        steering_vec = self.proj.weight[subspaces["idx"]]
+        neg_mask = subspaces["mag"] <= 0 # bs, 1, 1, this is only for null it out training #this is when applying suppression
+        pos_mask = subspaces["mag"] > 0.0 # bs, 1, 1 # this is when applying steering
+
+        latent = torch.ones_like((torch.bmm(base, steering_vec.unsqueeze(-1))+ self.proj.bias[subspaces["idx"]].unsqueeze(-1).unsqueeze(-1)) > 0) # bs, s, 1
+        if latent.shape[1] > 100:
+            mask = torch.zeros_like(latent)  # Create a mask of zeros with same shape as latent
+            mask[:, -100:, :] = 1  # Set first 100 positions to 1
+            latent = latent * mask
+        
+        neg_mask = torch.einsum("bsq, b->bsq", latent, neg_mask)
+        neg_steering_factor = torch.einsum("bsq, b->bs", neg_mask, (subspaces["mag"] - self.proj.bias[subspaces["idx"]])) # bs, s
+        pos_steering_factor = torch.einsum("b, b->b", (subspaces["mag"] + self.proj.bias[subspaces["idx"]]), pos_mask).unsqueeze(-1) # bs, 1
+        combined_steering_factor = neg_steering_factor + pos_steering_factor # bs, s
+        steering_vec = torch.einsum("bh, bs->bsh", steering_vec, combined_steering_factor) # bs, s, d
+        output = base + steering_vec
+
+        return output
+    
+
 class SamplingAdditionIntervention(
     SourcelessIntervention,
     TrainableIntervention, 
@@ -548,3 +615,315 @@ class SteeringVectorIntervention(
             output=output.to(base.dtype),
             latent=[latent]
         )
+
+
+
+class ConceptVectorIntervention(
+    SourcelessIntervention,
+    TrainableIntervention, 
+    DistributedRepresentationIntervention
+):
+    """
+    Phi(h) = h + v
+    """
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs, keep_last_dim=True)
+        self.proj = torch.nn.Linear(
+            self.embed_dim, kwargs["low_rank_dimension"])
+
+    def forward(
+        self, base, source=None, subspaces=None
+    ):
+        v = []
+        if "subspaces" in subspaces:
+            for subspace in subspaces["subspaces"]:
+                v += [self.proj.weight[subspace]]
+        else:
+            for i in range(base.shape[0]):
+                v += [self.proj.weight[0]]
+        v = torch.stack(v, dim=0).unsqueeze(dim=-1) # bs, h, 1
+        latent = torch.relu(torch.bmm(base, v)).squeeze(dim=-1) # bs, s, 1
+        steering_vec = v.permute(0, 2, 1) # bs, 1, h
+
+        # addition intervention
+        if "steering_factor" in subspaces:
+            steering_factor = subspaces["steering_factor"].unsqueeze(dim=-1).unsqueeze(dim=-1) # bs, 1, 1
+            output = base + steering_factor * steering_vec
+        else:
+            output = base + steering_vec
+
+        return InterventionOutput(
+            output=output.to(base.dtype),
+            latent=[latent]
+        )
+    
+
+class PreferenceVectorIntervention(
+    SourcelessIntervention,
+    TrainableIntervention, 
+    DistributedRepresentationIntervention
+):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs, keep_last_dim=True)
+        self.proj = torch.nn.Linear(
+            self.embed_dim, kwargs["low_rank_dimension"])
+        dropout = kwargs.get("dropout", 0.0)
+        self.dropout = torch.nn.Dropout(dropout)
+        self.intervention_positions_dropout = kwargs.get("intervention_positions_dropout", 0.0)
+        with torch.no_grad():
+            self.proj.bias.fill_(0)
+
+    def forward(
+        self, base, source=None, subspaces=None
+    ):
+        v = []
+        if "subspaces" in subspaces:
+            for subspace in subspaces["subspaces"]:
+                v += [self.proj.weight[subspace]]
+        else:
+            for i in range(base.shape[0]):
+                v += [self.proj.weight[0]]
+        v = torch.stack(v, dim=0).unsqueeze(dim=-1) # bs, h, 1
+        v_norm = torch.norm(v, dim=1, keepdim=True) # bs, 1, 1
+        latent = torch.relu((torch.bmm(base, v) + self.proj.bias).squeeze(dim=-1)) # bs, s, 1
+        steering_vec = v.permute(0, 2, 1) # bs, 1, h
+        steering_vec = self.dropout(steering_vec)
+        
+        if "steering_factor" in subspaces:
+            steering_factor = subspaces["steering_factor"].unsqueeze(dim=-1).unsqueeze(dim=-1) # bs, 1, 1
+            zero_mask = steering_factor == 0.0 # bs, 1, 1, this is only for null it out training
+            nonzero_mask = steering_factor != 0.0 # bs, 1, 1
+            # h - (h@v)/||v||^2 * v, steering coefficient is (h@v)/||v||^2
+            null_it_out_steering_factor = -(latent.unsqueeze(dim=-1) / v_norm**2)*zero_mask # bs, s, 1 * bs, 1, 1 = bs, s, 1
+            combined_steering_factor = null_it_out_steering_factor + (steering_factor + self.proj.bias*nonzero_mask) # bs, s, 1
+            # apply position based dropout
+            dropout_mask = torch.rand_like(combined_steering_factor.float()) > self.intervention_positions_dropout
+            combined_steering_factor *= dropout_mask
+            steering_vec = steering_vec * combined_steering_factor # bs, s, d
+        output = base + steering_vec
+
+        return InterventionOutput(
+            output=output.to(base.dtype),
+            latent=[latent]
+        )
+
+
+class LoraIntervention(
+    SourcelessIntervention,
+    TrainableIntervention, 
+    DistributedRepresentationIntervention
+):
+    """
+    LoRA(h') = h + BAx
+    """
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs, keep_last_dim=True)
+        self.r = kwargs["low_rank_dimension"]
+        self.lora_alpha = kwargs["alpha"] if "alpha" in kwargs else kwargs["low_rank_dimension"]
+        if "dropout" in kwargs and kwargs["dropout"] > 0.0:
+            self.lora_dropout = nn.Dropout(p=kwargs["dropout"])
+        else:
+            self.lora_dropout = lambda x: x
+
+        # Actual trainable parameters
+        self.lora_A = nn.Parameter(torch.zeros(kwargs["input_dim"], kwargs["low_rank_dimension"]))
+        self.lora_B = nn.Parameter(torch.zeros(kwargs["low_rank_dimension"], self.embed_dim))
+
+        # initialize A the same way as the default for nn.Linear and B to zero
+        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B)
+        self.lora_A = nn.Parameter(self.lora_A.to(torch.bfloat16))
+        self.lora_B = nn.Parameter(self.lora_B.to(torch.bfloat16))
+
+    def forward(
+        self, base, source=None, subspaces=None, **kwargs
+    ):
+        original_input = kwargs["args"]
+        return base + self.lora_dropout(original_input) @ self.lora_A @ self.lora_B
+    
+
+class PreferenceLoraIntervention(
+    SourcelessIntervention,
+    TrainableIntervention, 
+    DistributedRepresentationIntervention
+):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs, keep_last_dim=True)
+        self.r = kwargs["low_rank_dimension"]
+        self.lora_alpha = kwargs["alpha"] if "alpha" in kwargs else kwargs["low_rank_dimension"]
+        self.dropout = kwargs.get("dropout", 0.0)
+        self.intervention_positions_dropout = kwargs.get("intervention_positions_dropout", 0.0)
+        if self.dropout > 0.0:
+            self.lora_dropout = nn.Dropout(p=self.dropout)
+        else:
+            self.lora_dropout = lambda x: x
+
+        # Actual trainable parameters
+        self.lora_A = nn.Parameter(torch.zeros(kwargs["input_dim"], kwargs["low_rank_dimension"]))
+        self.lora_B = nn.Parameter(torch.zeros(kwargs["low_rank_dimension"], self.embed_dim))
+
+        # initialize A the same way as the default for nn.Linear and B to zero
+        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B)
+        self.lora_A = nn.Parameter(self.lora_A.to(torch.bfloat16))
+        self.lora_B = nn.Parameter(self.lora_B.to(torch.bfloat16))
+
+    def forward(
+        self, base, source=None, subspaces=None, **kwargs
+    ):
+        original_input = kwargs["args"]
+        
+        # Pre-compute B×A for applying steering factor
+        lora_weights = self.lora_A @ self.lora_B
+        
+        if "steering_factor" in subspaces:
+            # Apply steering factor directly to the weights
+            steering_factor = subspaces["steering_factor"].unsqueeze(dim=-1).unsqueeze(dim=-1).to(base.dtype)  # bs, 1, 1            
+            # Apply steering factor directly to the weights
+            lora_weights = steering_factor * lora_weights
+
+        lora_output = self.lora_dropout(original_input @ lora_weights)
+        output = base + lora_output.to(base.dtype)
+        
+        return InterventionOutput(
+            output=output,
+            latent=[None]
+        )
+    
+
+class LoreftIntervention(
+    SourcelessIntervention,
+    TrainableIntervention, 
+    DistributedRepresentationIntervention
+):
+    """
+    LoReFT(h) = h + R^T(Wh + b − Rh)
+    """
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs, keep_last_dim=True)
+        rotate_layer = LowRankRotateLayer(
+            self.embed_dim, kwargs["low_rank_dimension"], init_orth=True)
+        self.rotate_layer = torch.nn.utils.parametrizations.orthogonal(rotate_layer)
+        self.learned_source = torch.nn.Linear(
+            self.embed_dim, kwargs["low_rank_dimension"]).to(
+            kwargs["dtype"] if "dtype" in kwargs else torch.bfloat16)
+        self.dropout = torch.nn.Dropout(kwargs["dropout"] if "dropout" in kwargs else 0.0)
+        
+    def forward(
+        self, base, source=None, subspaces=None
+    ):
+        rotated_base = self.rotate_layer(base)
+        output = base + torch.matmul(
+            (self.learned_source(base) - rotated_base), self.rotate_layer.weight.T
+        )
+        return self.dropout(output.to(base.dtype))
+
+
+class PreferenceLoreftIntervention(
+    SourcelessIntervention,
+    TrainableIntervention, 
+    DistributedRepresentationIntervention
+):
+    """
+    PreferenceLoreFT(h) = h + R^T(steering_factor * (Wh + b) - Rh) with steering factors
+    Where steering factor directly scales the transformation.
+    When steering_factor is 0 (null-it-out case), we zero out the source output.
+    """
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs, keep_last_dim=True)
+        rotate_layer = LowRankRotateLayer(
+            self.embed_dim, kwargs["low_rank_dimension"], init_orth=True)
+        self.rotate_layer = torch.nn.utils.parametrizations.orthogonal(rotate_layer)
+        self.learned_source = torch.nn.Linear(
+            self.embed_dim, kwargs["low_rank_dimension"]).to(
+            kwargs["dtype"] if "dtype" in kwargs else torch.bfloat16)
+        self.dropout = torch.nn.Dropout(kwargs.get("dropout", 0.0))
+        self.intervention_positions_dropout = kwargs.get("intervention_positions_dropout", 0.0)
+        
+    def forward(
+        self, base, source=None, subspaces=None
+    ):
+        rotated_base = self.rotate_layer(base)
+        source_output = self.learned_source(base)
+        
+        # Calculate a "latent" value - norm of the activation difference
+        latent = torch.norm(source_output - rotated_base, dim=-1)  # bs, s
+        
+        diff = (source_output - rotated_base)
+        if "steering_factor" in subspaces:
+            steering_factor = subspaces["steering_factor"].unsqueeze(dim=-1).unsqueeze(dim=-1)  # bs, 1, 1
+            diff = steering_factor * diff
+
+        # Calculate the final output
+        output = base + torch.matmul(diff, self.rotate_layer.weight.T)
+        
+        return InterventionOutput(
+            output=self.dropout(output.to(base.dtype)),
+            latent=[latent]
+        )
+
+
+class NodireftIntervention(
+    SourcelessIntervention,
+    TrainableIntervention, 
+    DistributedRepresentationIntervention
+):
+    """
+    NodiReFT(h) = h + W2^T(W1h + b)
+    """
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs, keep_last_dim=True)
+        self.proj_layer = torch.nn.Linear(
+            self.embed_dim, kwargs["low_rank_dimension"], bias=False).to(
+            kwargs["dtype"] if "dtype" in kwargs else torch.bfloat16)
+        self.learned_source = torch.nn.Linear(
+            self.embed_dim, kwargs["low_rank_dimension"]).to(
+            kwargs["dtype"] if "dtype" in kwargs else torch.bfloat16)
+        self.dropout = torch.nn.Dropout(kwargs["dropout"] if "dropout" in kwargs else 0.0)
+        
+    def forward(
+        self, base, source=None, subspaces=None
+    ):
+        output = base + torch.matmul(
+            self.learned_source(base), self.proj_layer.weight
+        )
+        return self.dropout(output.to(base.dtype))
+
+
+class PreferenceNodireftIntervention(
+    SourcelessIntervention,
+    TrainableIntervention, 
+    DistributedRepresentationIntervention
+):
+    """
+    NodiReFT(h) = h + W2^T(W1h + b)
+    """
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs, keep_last_dim=True)
+        self.proj_layer = torch.nn.Linear(
+            self.embed_dim, kwargs["low_rank_dimension"], bias=False).to(
+            kwargs["dtype"] if "dtype" in kwargs else torch.bfloat16)
+        self.learned_source = torch.nn.Linear(
+            self.embed_dim, kwargs["low_rank_dimension"]).to(
+            kwargs["dtype"] if "dtype" in kwargs else torch.bfloat16)
+        self.dropout = torch.nn.Dropout(kwargs["dropout"] if "dropout" in kwargs else 0.0)
+        
+    def forward(
+        self, base, source=None, subspaces=None
+    ):
+
+        diff = torch.matmul(
+            self.learned_source(base), self.proj_layer.weight
+        )
+        if "steering_factor" in subspaces:
+            steering_factor = subspaces["steering_factor"].unsqueeze(dim=-1).unsqueeze(dim=-1)  # bs, 1, 1
+            diff = steering_factor * diff
+
+        # Calculate the final output
+        output = base + diff
+        
+        return InterventionOutput(
+            output=self.dropout(output.to(base.dtype)),
+            latent=[diff]
+        )
+

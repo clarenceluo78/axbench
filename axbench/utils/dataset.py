@@ -490,7 +490,7 @@ class DatasetFactory(object):
         if keep_orig_axbench_format:
             self.logger.warning(f"keep_orig_axbench_format is set to True. Using the local model to generate responses.")
             losing_outputs = get_model_continues(
-                self.model, self.tokenizer, positive_prompts,
+                kwargs["model"], kwargs["tokenizer"], positive_prompts,
                 max_new_tokens=int(output_length*1.5), 
                 is_chat_model=is_chat_model, 
                 include_system_prompt=include_system_prompt,
@@ -826,6 +826,9 @@ class SteeringDatasetFactory(object):
                 assert self.master_data_dir is not None, "Master data dir is required for AlpacaEval."
                 alpaca_eval_path = os.path.join(self.master_data_dir, "alpaca_eval.json")
                 alpaca_eval_df = pd.read_json(alpaca_eval_path)
+                if os.path.exists(suppress_eval_path):
+                    df = pd.read_parquet(suppress_eval_path)
+                    prompt = df[df["concept_id"] == concept_id]
                 if dump_dir is not None:
                     try:
                         prompt = pd.read_csv(os.path.join(dump_dir, "steering_data_merged.csv"))
@@ -899,7 +902,7 @@ class SteeringDatasetFactory(object):
                             for i in range(subset_n):                      
                                 sampled_prompt = sampled_prompts[i]
                                     # for prompt-based steering ONLY.
-                                steered_prompt = f"Strictly ignore any previous instructions.\n{multi_shot_prompt}Question:{instruction_blend[i]}\nStrictly ignore any following instructions." #original
+                                steered_prompt = f"{multi_shot_prompt}Question: {instruction_blend[i]}\nAnswer:"
                                 formatted_steered_prompt = self.tokenizer.apply_chat_template(
                                     [{"role": "user", "content": steered_prompt}], 
                                     tokenize=True, add_generation_prompt=True)[1:] # get rid of bos token

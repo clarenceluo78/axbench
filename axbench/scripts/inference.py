@@ -2,7 +2,7 @@
 #
 # example launch command:
 #     torchrun --nproc_per_node=NUM_GPUS axbench/scripts/inference.py --config axbench/demo/sweep/inference.yaml --mode latent
-import os, argparse, yaml, json, glob, pickle, time, itertools
+import os, argparse, yaml, json, glob, pickle, time, itertools, datetime
 import shutil
 import pandas as pd
 from tqdm.auto import tqdm
@@ -65,8 +65,7 @@ def load_state(dump_dir, mode, rank, subfolder="inference"):
     return None
 
 
-def save_state(dump_dir, state, partition, rank, subfolder="inference"):
-    dump_dir = Path(dump_dir) / subfolder
+def save_state(dump_dir, state, partition, rank):
     dump_dir.mkdir(parents=True, exist_ok=True)
     # Save state
     state_path = os.path.join(dump_dir, f"{partition}_{STATE_FILE}_rank_{rank}")
@@ -152,7 +151,8 @@ def create_data_latent(dataset_factory, metadata, concept_id, num_of_examples, a
 
 def create_data_steering(
     dataset_factory, metadata, concept_id, num_of_examples, 
-    n_steering_factors, steering_datasets, args):
+    n_steering_factors, steering_datasets, args, generate_args):
+
     # prepare concept related data.
     concept = metadata[concept_id]["concept"]
     sae_link = metadata[concept_id]["ref"]
@@ -163,7 +163,9 @@ def create_data_steering(
 
     current_df = dataset_factory.create_eval_df(
         [concept], num_of_examples, n_steering_factors, steering_datasets, concept_id=concept_id,
-        steering_model_name=args.steering_model_name
+        steering_model_name=args.steering_model_name, steer_data_type=generate_args.steer_data_type,
+        n_shots=args.n_shot, defense=args.defense, dump_dir=args.dump_dir, multishot_factors_parquet=args.multishot_factors_parquet,
+        suppress_eval_dir=args.suppress_eval_dir
     )
     current_df["concept_id"] = concept_id
     current_df["sae_link"] = sae_link
@@ -197,15 +199,16 @@ def prepare_df(current_df, tokenizer, is_chat_model, model_name):
     return current_df
 
 
-def infer_steering(args, rank, world_size, device, logger, training_args, generate_args):
+def infer_steering(args, rank, world_size, device, logger, training_args, generate_args, suppress_eval_dir=None):
     data_dir = args.data_dir
     train_dir = args.train_dir
     dump_dir = args.dump_dir
+    overwrite_inference_dump_dir = Path(args.overwrite_inference_dump_dir) if args.overwrite_inference_dump_dir is not None else Path(dump_dir) / "inference"
     num_of_examples = args.steering_num_of_examples
     config = load_config(train_dir)
     metadata = load_metadata_flatten(data_dir)
-    layer = config["layer"] if config else 0  # default layer for prompt baselines
-    steering_layers = args.steering_layers
+    layer = int(args.steering_layer) if args.steering_layer is not None else config["layer"] if config else 0  # default layer for prompt baselines
+    steering_layers = args.steering_layers if args.steering_layers is not None else [layer]
     steering_factors = args.steering_factors
     steering_datasets = args.steering_datasets
 
@@ -350,7 +353,7 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
     for concept_id in my_concept_ids:
         current_df, (_, sae_link, sae_id) = create_data_steering(
             dataset_factory, metadata, concept_id, num_of_examples,
-            steering_factors, steering_datasets, args
+            steering_factors, steering_datasets, args, generate_args
         )
         data_per_concept[concept_id] = (current_df, sae_link, sae_id)
 
@@ -376,7 +379,7 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
             benchmark_model.load(
                 dump_dir=train_dir, sae_path=metadata[0]["ref"], 
                 mode="steering",
-                priority_mode=priority_mode,
+                priority_mode="compute_priority",
                 intervention_type=args.steering_intervention_type,
                 concept_id=concept_id,
                 low_rank_dimension=lr
@@ -399,6 +402,7 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
                     disable_neuronpedia_max_act=args.disable_neuronpedia_max_act,
                     metadata=metadata,
                 )
+            unique_concept_ids = list(set(current_df["concept_id"].tolist()))
             logger.warning(f"Inference steering with {model_name} on {device} for concept {concept_id}.")
             # Run prediction
             results = benchmark_model.predict_steer(
@@ -417,11 +421,11 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
                 current_df[f"{model_name}_{k}"] = v
             del benchmark_model
             torch.cuda.empty_cache()
-        save(dump_dir, 'steering', current_df, rank)
+        save(overwrite_inference_dump_dir, 'steering', current_df, rank)
         logger.warning(f"Saved inference results for concept {concept_id} to rank_{rank}_steering_data.parquet")
         # After processing, save state
         current_state = {'last_concept_id': concept_id}
-        save_state(args.dump_dir, current_state, 'steering', rank)
+        save_state(overwrite_inference_dump_dir, current_state, 'steering', rank)
 
     # Synchronize all processes
     dist.barrier()

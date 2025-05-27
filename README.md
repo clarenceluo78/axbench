@@ -40,7 +40,7 @@
 ## 🔥 New releases
 
 - 05/25: Steering eval on feature suppression / many-shot jailbreaking are added.
-- 05/25: New steering method RePS from [improved representation steering for language models](link-goes-here).
+- 05/25: New *preference-based steering* method from [improved representation steering for language models](link-goes-here).
 
 
 ## 🎯 Highlights
@@ -110,13 +110,22 @@ bash axbench/demo/demo.sh
 **Generate training data:**
 
 ```bash
-uv run axbench/scripts/generate.py --config axbench/demo/sweep/simple.yaml --dump_dir axbench/demo
+uv run axbench/scripts/generate.py --config axbench/demo/sweep/simple.yaml --mode training --dump_dir axbench/demo
 ```
 
 **Generate inference data:**
 
 ```bash
-uv run axbench/scripts/generate_latent.py --config axbench/demo/sweep/simple.yaml --dump_dir axbench/demo
+uv run axbench/scripts/generate.py --config axbench/demo/sweep/simple.yaml --mode latent --dump_dir axbench/demo
+```
+
+**Generate preference-based training data:**
+
+```bash
+uv run axbench/scripts/generate.py --config axbench/demo/sweep/simple.yaml \
+  --mode dpo_training --dump_dir axbench/demo \
+  --model_name google/gemma-2-2b-it \
+  --inference_batch_size 64
 ```
 
 To modify the data generation process, edit `simple.yaml`.
@@ -142,7 +151,8 @@ torchrun --nproc_per_node=$gpu_count axbench/scripts/train.py \
   --overwrite_data_dir axbench/concept500/prod_2b_l10_v1/generate
 ```
 
-where `--dump_dir` is the output directory, and `--overwrite_data_dir` is where the training data resides.
+where `--dump_dir` is the output directory, and `--overwrite_data_dir` is where the training data resides. You might overwrite other parameters as `--layer 10` for customized tuning.
+
 
 ## Inference
 

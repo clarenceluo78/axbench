@@ -12,6 +12,7 @@ import pickle
 import torch
 import shutil
 import requests
+import datetime
 import pandas as pd
 import numpy as np
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -296,9 +297,13 @@ def main():
     # Load dataset and metadata
     metadata_path = os.path.join(args.data_dir, 'metadata.jsonl')
     metadata = load_metadata(metadata_path)
-    df_generator = data_generator(args.data_dir)
-    all_df = pd.read_parquet(os.path.join(args.data_dir, 'train_data.parquet')) # this is needed for binarizing the dataset
+    df_generator = data_generator(args.data_dir, use_dpo_loss=args.use_dpo_loss)
+    if args.use_dpo_loss:
+        all_df = pd.read_parquet(os.path.join(args.data_dir, 'dpo_train_data.parquet'))
+    else:
+        all_df = pd.read_parquet(os.path.join(args.data_dir, 'train_data.parquet')) # this is needed for binarizing the dataset
     negative_df = all_df[(all_df["output_concept"] == EMPTY_CONCEPT) & (all_df["category"] == "negative")]
+    
     df_list = list(df_generator)
     logger.warning(f"Total number of concept df loaded: {len(df_list)}")
     if args.max_concepts:
@@ -311,7 +316,10 @@ def main():
     # save pruned SAE
     sae_params = None # TODO: this is a workaround to avoid breaking the code.
     if rank == 0:
-        sae_params = save_pruned_sae(metadata_path, dump_dir)
+        try:
+            sae_params = save_pruned_sae(metadata_path, dump_dir)
+        except:
+            sae_params = None
 
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, model_max_length=512)

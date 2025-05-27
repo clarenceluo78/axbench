@@ -577,7 +577,7 @@ def generate_dpo_training(args, inference_args):
 
     # Init the dataset factory.
     dataset_factory = DatasetFactory(
-        client, args.dataset_category, num_of_examples, int(args.output_length), 
+        None, client, None, args.dataset_category, num_of_examples, int(args.output_length), 
         dump_dir, use_cache=args.lm_use_cache, master_data_dir=args.master_data_dir,
         seed=int(args.seed), lm_model=args.lm_model, start_concept_id=start_concept_id, 
         is_inference=True, is_dpo=True, concepts=concepts,

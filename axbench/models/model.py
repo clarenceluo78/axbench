@@ -76,6 +76,7 @@ class Model(BaseModel):
         self.steering_layers = kwargs.get("steering_layers", None)
         self.num_of_layers = len(self.steering_layers) if self.steering_layers else 1
         self.dump_dir = kwargs.get("dump_dir", None)
+        self.use_wandb = kwargs.get("use_wandb", False)
 
     def make_model(self, **kwargs):
         pass
@@ -109,16 +110,45 @@ class Model(BaseModel):
         torch.save(bias, bias_file)
 
     def load(self, dump_dir=None, **kwargs):
-        model_name = kwargs.get("model_name", self.__str__())
-        weight = torch.load(
-            f"{dump_dir}/{model_name}_weight.pt"
-        )
-        bias = torch.load(
-            f"{dump_dir}/{model_name}_bias.pt"
-        )
-        self.make_model(low_rank_dimension=weight.shape[0], **kwargs)
-        self.ax.proj.weight.data = weight.to(self.device)
-        self.ax.proj.bias.data = bias.to(self.device)
+        priority_mode = kwargs.get("priority_mode", "compute_priority")
+        self.priority_mode = priority_mode
+        if priority_mode == "mem_priority":
+            # prioritize MEM
+            concept_id = kwargs.get("concept_id")
+            model_name = kwargs.get("model_name", self.__str__())
+            weight = torch.load(
+                f"{dump_dir}/{model_name}_weight.pt",
+                map_location=torch.device("cpu"),
+                mmap=True  # Enable memory mapping
+            )
+            bias = torch.load(
+                f"{dump_dir}/{model_name}_bias.pt",
+                map_location=torch.device("cpu"),
+                mmap=True  # Enable memory mapping
+            )
+            weight_rank_1 = weight[concept_id].unsqueeze(0)
+            bias_rank_1 = bias[concept_id].unsqueeze(0)
+            # load only 1 rank to prevent OOM, and faster inference
+            self.make_model(**kwargs)
+            self.ax.proj.weight.data = weight_rank_1.to(self.device)
+            self.ax.proj.bias.data = bias_rank_1.to(self.device)
+        elif priority_mode == "compute_priority":
+            # prioritize COMPUTE
+            model_name = kwargs.get("model_name", self.__str__())
+            print(f"Loading {model_name} from {dump_dir}.")
+            weight = torch.load(
+                f"{dump_dir}/{model_name}_weight.pt",
+                map_location=torch.device("cpu"),
+            )
+            bias = torch.load(
+                f"{dump_dir}/{model_name}_bias.pt",
+                map_location=torch.device("cpu"),
+            )
+            # override low_rank_dimension in kwargs
+            kwargs["low_rank_dimension"] = weight.shape[0]
+            self.make_model(**kwargs)
+            self.ax.proj.weight.data = weight.to(self.device)
+            self.ax.proj.bias.data = bias.to(self.device)
     
     @torch.no_grad()
     def predict_latent(self, examples, **kwargs):

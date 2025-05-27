@@ -264,11 +264,8 @@ def plot_metrics_multiple_datasets(data_path, write_to_path=None, report_to=[], 
     # For each dataset, calculate average metrics for each factor
     for dataset in datasets:
         dataset_data = df[df['dataset_name'] == dataset]     
-        print(dataset)
-        print(methods)
         # Group by method and factor, then calculate mean for each metric
         for method in methods:
-            print(method)
             if 'PromptSteering' in method:
                 # For PromptSteering, average across all factors
                 # Calculate average for each metric
