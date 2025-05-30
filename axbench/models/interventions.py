@@ -74,6 +74,45 @@ class TopKReLUSubspaceIntervention(
         )
 
 
+
+class SimpleAdditionIntervention(
+    SourcelessIntervention,
+    TrainableIntervention, 
+    DistributedRepresentationIntervention
+):
+    """
+    Phi(h) = h + Mean(TopK(ReLU(h@v)))*v
+    """
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs, keep_last_dim=True)
+        self.low_rank_dimension = kwargs["low_rank_dimension"]
+        self.v : torch.Tensor = None
+    
+    def _update_v(self, new_vect: torch.Tensor):
+        self.v = new_vect
+        
+    def _reset_v(self):
+        self.v = None
+
+    def forward(
+        self, base, source=None, subspaces=None
+    ):
+        assert self.v is not None, "v is not set. Please set v before calling forward."
+        assert self.v.shape == (base.shape[0], self.embed_dim), "v shape mismatch."
+        steering_vec = self.v.unsqueeze(dim=1) # bs, 1, h
+        if subspaces:
+            if "meg" in subspaces.keys():
+                
+                # If a scaler magnitude is provided, scale the steering vector
+                steering_vec = subspaces["mag"].unsqueeze(dim=-1) * steering_vec
+            
+        # addition intervention
+        output = base + steering_vec
+
+        return InterventionOutput(
+            output=output.to(base.dtype)
+        )
+        
 class TopKReLUIntervention(
     SourcelessIntervention,
     TrainableIntervention, 
