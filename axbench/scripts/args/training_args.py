@@ -77,6 +77,9 @@ class ModelParams:
     steering_prompt_type: Optional[str] = "prepend"
     substraction_type: Optional[str] = "null_it_out" # normal or null_it_out
     output_length: Optional[int] = 768
+    hypernet_name_or_path: Optional[str] = None
+    hypernet_initialize_from_pretrained: Optional[bool] = True
+    num_hidden_layers: Optional[int] = None
 
 class TrainingArgs:
     def __init__(
@@ -122,7 +125,8 @@ class TrainingArgs:
             'lora_components', 'lora_alpha', 'weight_decay', 'temperature_start', 'temperature_end',
             'train_on_negative', 'use_synergy', 'bow_penalty', 'bow_C', 'loss_type', 'beta', 'gemma', 
             'reference_free', 'label_smoothing', 'steering_factors', 'negative_only', 'simpo_scaler', 
-            'intervention_positions_dropout', 'dropout', 'preference_pairs', 'steering_prompt_type'
+            'intervention_positions_dropout', 'dropout', 'preference_pairs', 'steering_prompt_type',
+            'hypernet_name_or_path', 'hypernet_initialize_from_pretrained', "num_hidden_layers"
         ]
         all_params = global_params + hierarchical_params
 

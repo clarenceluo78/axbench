@@ -27,6 +27,7 @@ import torch.distributed as dist
 import sys
 from torch.utils.data import DataLoader
 from axbench.models.sae import save_pruned_sae
+from axbench.models.hypernet.utils import prepare_df_combined
 
 # all supported methods
 import axbench
@@ -241,6 +242,70 @@ def save_state(dump_dir, state, concept_metadata, rank):
     metadata_path = os.path.join(dump_dir, f"rank_{rank}_{METADATA_FILE}")
     with open(metadata_path, "a") as f:
         f.write(json.dumps(concept_metadata) + "\n")
+        
+        
+def train_hypersteer(args, generate_args, model_instance, tokenizer, all_df, metadata, dump_dir, rank, device, local_rank, world_size):
+    # Get the rank and world_size from environment variables
+    negative_df = all_df[(all_df["output_concept"] == EMPTY_CONCEPT) & (all_df["category"] == "negative")]
+    model_name = "HyperSteer"
+    
+    metadata_path = os.path.join(args.data_dir, 'metadata.jsonl')
+    is_chat_model = True if args.model_name in CHAT_MODELS else False
+    
+    benchmark_model = getattr(axbench, model_name)(
+        model_instance, tokenizer, layer=args.layer,
+        training_args=args.models[model_name],
+        lm_model_name=args.model_name,
+        device=device, seed=args.seed, 
+    )
+    
+    low_rank_dimension = args.models[model_name].low_rank_dimension \
+        if args.models[model_name].low_rank_dimension else 1
+        
+    prefix_length = 1 # prefix is default to 1 for all models due to theBOS token.
+    if is_chat_model:
+        prefix_length = get_prefix_length(tokenizer)
+        logger.warning(f"Chat model prefix length: {prefix_length}")
+        
+    benchmark_model.make_model(
+        mode="train",
+        embed_dim=model_instance.config.hidden_size,
+        low_rank_dimension=low_rank_dimension,
+        num_hidden_layers=args.models[model_name].num_hidden_layers,
+        dtype=torch.bfloat16 if args.use_bf16 else None,
+        intervention_type=args.models[model_name].intervention_type,
+        metadata_path=metadata_path,
+        dump_dir=dump_dir,
+        model_params=args.models[model_name],
+        hypernet_name_or_path=args.models[model_name].hypernet_name_or_path,
+        hypernet_initialize_from_pretrained=args.models[model_name].hypernet_initialize_from_pretrained,
+    )
+    
+    full_df = all_df.copy()
+    
+    full_df = prepare_df_combined(
+        full_df, negative_df, tokenizer, 
+        binarize=args.models[model_name].binarize_dataset, 
+        train_on_negative=args.models[model_name].train_on_negative,
+        is_chat_model=is_chat_model,
+        output_length=generate_args.output_length,
+        model_name=args.model_name,
+        max_num_of_examples=args.max_num_of_examples,
+    )
+    
+    kwargs = {
+        "prefix_length": prefix_length,
+        "positions": args.models[model_name].intervention_positions,
+        "exclude_bos": args.models[model_name].exclude_bos,
+        "metadata_path": metadata_path,
+        "world_size": world_size,
+    }
+    
+    benchmark_model.train(full_df, **kwargs)
+    if rank == 0:
+        logger.warning("Rank 0 is merging results.")
+        benchmark_model.save(dump_dir, model_name=model_name)
+    
 
 def main():
    
@@ -359,7 +424,7 @@ def main():
 
     # Run training for assigned concept_ids
     # logger.warning(metadata)
-
+    
     for concept_id, concept_df in my_df_list:
         concept_id = int(concept_id)
         if last_concept_id is not None and concept_id <= last_concept_id:
@@ -367,6 +432,10 @@ def main():
             continue
         logger.warning(f"Training models for concept_id {concept_id} on rank {rank}")
         for model_name in sorted(args.models.keys()):
+            
+            if model_name == "HyperSteer":
+                continue # training of HyperSteer is ran separately.
+            
             concept = metadata[concept_id]["concept"]
             logger.warning(f"Training {model_name} with concept {concept}")
             benchmark_model = getattr(axbench, model_name)(
@@ -452,6 +521,12 @@ def main():
 
     # Synchronize all processes
     dist.barrier()
+    
+    if "HyperSteer" in args.models.keys():
+        train_hypersteer(args, generate_args, model_instance, tokenizer, all_df, metadata, dump_dir, rank, device, local_rank, world_size)
+    
+    # Synchronize all processes 
+    dist.barrier()
 
     # Rank 0 merges results
     if rank == 0:
@@ -479,6 +554,10 @@ def main():
             json.dump(config, f)
 
         for model_name in sorted(args.models.keys()):
+            
+            if model_name == "HyperSteer":
+                continue
+            
             # merge pruned SAEs
             sae_files = [dump_dir / f"rank_{r}_{model_name}.pt" for r in range(world_size)]
             sae_files_existing = [f for f in sae_files if f.exists()]

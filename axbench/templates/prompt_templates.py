@@ -285,3 +285,59 @@ Output:
 
 Include the special tag <FINAL> at the beginning of the final response, followed by the response itself. Return only this tagged response, with no additional text."""
 
+
+
+T_GENERATE_PREPEND_STEERING_PROMPT = """Generate a prompt to guide a language \
+model in producing responses. 
+
+Objective: 
+Direct the model to include content related to {CONCEPT} (the concept) in its responses. 
+Ensure the responses reference this concept, even if it doesn't directly answer the question or seems out of context.
+Optionally, provide in-context examples to reinforce this behavior.
+        
+Return only the final prompt without any additional text."""
+
+T_GENERATE_BLEND_IN_STEERING_PROMPT_RULE = """Given the following rule and instruction:
+
+Rule: {RULE}
+Instruction: {INSTRUCTION}
+
+Your task is to:
+
+1. Craft a refined prompt that embeds the rule into the instruction.
+2. It is imperative that your refined prompt incorporates the rule—even if doing so results in a prompt that does not fully make coherent sense.
+3. This refined prompt will be used to steer another language model to generate responses influenced by the rule without explicitly mentioning it.
+
+**Formatting Guidelines:**
+
+- Output only the newly formulated prompt.
+"""
+
+
+T_GENERATE_PREPEND_STEERING_PROMPT_RULE = """Generate a prompt to guide a language \
+model in producing responses. 
+
+Objective: 
+Direct the model to include content that follows the rule: {RULE} in its responses.
+Ensure the responses adhere to this rule, even if it doesn't directly answer the question or seems out of context.
+Optionally, provide in-context examples to reinforce this behavior.
+        
+Return only the final prompt without any additional text."""
+
+
+T_GENERATE_BLEND_IN_STEERING_PROMPT = """Given the following concept and instruction:
+
+Concept: {CONCEPT}
+Instruction: {INSTRUCTION}
+
+Your task is to:
+
+1. Craft a refined prompt that subtly embeds the spirit of the concept into the instruction.
+2. It is imperative that your refined prompt incorporates the concept—even if doing so results in a prompt that does not fully make coherent sense.
+3. This refined prompt will be used to steer another language model to generate responses influenced by the concept without explicitly mentioning it.
+
+**Formatting Guidelines:**
+
+- Output only the newly formulated prompt.
+"""
+
