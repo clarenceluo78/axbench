@@ -39,7 +39,6 @@ axbench/data/seed_instructions/
 axbench/models/dbm.py
 axbench/concept1
 axbench/concept3
-axbench/concept10
 
 axbench/examples/upload.ipynb
 tmp.ipynb
