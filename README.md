@@ -14,8 +14,7 @@
 
 ## Related papers
 
-- Coming soon!
-- [*HyperSteer*: Activation Steering at Scale with Hypernetworks]
+- [*HyperSteer*: Activation Steering at Scale with Hypernetworks](https://github.com/stanfordnlp/axbench)
 - [Improved Representation Steering for Language Models [preprint]](https://arxiv.org/pdf/2505.20809).
 - [SAEs Are Good for Steering -- If You Select the Right Features [preprint]](https://arxiv.org/abs/2505.20063).
 - [AxBench: Steering LLMs? Even Simple Baselines Outperform Sparse Autoencoders [ICML 2025 (spotlight)]](https://arxiv.org/abs/2501.17148).
@@ -27,8 +26,8 @@
 
 | Method                       | 2B L10 | 2B L20 | 9B L20 | 9B L31 |  Avg |
 |------------------------------|-------:|-------:|-------:|-------:|-----:|
+| HyperSteer [[Sun et al., 2025]](https://github.com/stanfordnlp/axbench)                   | - | **0.742** | **1.091** | - | **0.917** |
 | Prompt                       | 0.698 | 0.731 | 1.075 | **1.072** | 0.894 |
-| HyperSteer [Sun et al., 2025]                   | - | **0.742** | **1.091** | - | **0.917** |
 | RePS [[Wu et. al., 2025]](https://arxiv.org/pdf/2505.20809)           | **0.756** | 0.606 | 0.892 | 0.624 | 0.720 |
 | ReFT-r1                      | 0.633 | 0.509 | 0.630 | 0.401 | 0.543 |
 | SAE (filtered) [[Arad et. al., 2025]](https://arxiv.org/abs/2505.20063) | - | - | 0.546 | 0.470 | 0.508 |
