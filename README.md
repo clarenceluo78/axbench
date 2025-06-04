@@ -14,7 +14,7 @@
 
 ## Related papers
 
-- [*HyperSteer*: Activation Steering at Scale with Hypernetworks](https://github.com/stanfordnlp/axbench)
+- [*HyperSteer*: Activation Steering at Scale with Hypernetworks [preprint]](https://github.com/stanfordnlp/axbench)
 - [Improved Representation Steering for Language Models [preprint]](https://arxiv.org/pdf/2505.20809).
 - [SAEs Are Good for Steering -- If You Select the Right Features [preprint]](https://arxiv.org/abs/2505.20063).
 - [AxBench: Steering LLMs? Even Simple Baselines Outperform Sparse Autoencoders [ICML 2025 (spotlight)]](https://arxiv.org/abs/2501.17148).
