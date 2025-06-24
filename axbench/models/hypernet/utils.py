@@ -39,7 +39,7 @@ def apply_rotary_pos_emb(q, cos, sin, position_ids=None, unsqueeze_dim=1):
 def prepare_df_combined(
         original_df, negative_df, tokenizer, 
         binarize, train_on_negative, is_chat_model, output_length, model_name, max_num_of_examples=None,
-        replace_negative_description=True, negative_example_ratio=1):
+        replace_negative_description=True, negative_example_ratio=None):
     suffix_length, suffix_str = get_suffix_length(tokenizer)
     # print(f"Suffix length for {model_name}: {suffix_length}, Suffix string: {suffix_str}")
     # assign input and output containing concept with 1, otherwise 0

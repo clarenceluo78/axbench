@@ -359,6 +359,10 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
     # Prepare data per concept
     data_per_concept = {}
     for concept_id in my_concept_ids:
+        
+        """current_df = pd.read_parquet(f"/nlp/scr/sjd24/merge/axbench/axbench/concept10/prod_2b_l20_v1/debug_data/{concept_id}_steering_data.parquet")
+        sae_link, sae_id = None, None"""
+        
         current_df, (_, sae_link, sae_id) = create_data_steering(
             dataset_factory, metadata, concept_id, num_of_examples,
             steering_factors, steering_datasets, args, generate_args
@@ -388,8 +392,6 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
                 num_hidden_layers=training_args.models[model_name].num_hidden_layers,
             )
             preloaded_models[model_name] = benchmark_model
-
-    
 
     # Now loop over concept_ids and use preloaded models
     for concept_id in my_concept_ids:

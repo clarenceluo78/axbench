@@ -10,13 +10,7 @@ from pyvene import (
     IntervenableConfig,
     IntervenableModel
 )
-from .interventions import (
-    TopKReLUSubspaceIntervention,
-    SimpleAdditionIntervention,
-    SubspaceIntervention,
-    SamplingAdditionIntervention,
-    ThresholdingIntervention
-)
+from .interventions import SimpleAdditionIntervention, HyperTopKReLUIntervention
 from ..utils.data_utils import make_data_module
 from ..utils.constants import EXAMPLE_TAG
 from torch.utils.data import DataLoader
@@ -100,9 +94,7 @@ class HyperSteer(Model):
         return 'HyperSteer'
 
     def make_model(self, **kwargs):
-        mode = kwargs.get("mode", "latent")
-        intervention_type = kwargs.get("intervention_type", "addition")
-        
+        mode = kwargs.get("mode", "latent")        
         intervention_type = kwargs.get("intervention_type", "addition")
         if intervention_type == "addition":
             ax = SimpleAdditionIntervention(
@@ -264,10 +256,6 @@ class HyperSteer(Model):
                 loss = steering_loss
                 loss = loss.mean()
                 loss /= self.training_args.gradient_accumulation_steps
-                # steering_loss += coeff * self.training_args.coeff_latent_l1_loss * l1_loss
-                # steering_loss = steering_loss.mean()
-                # steering_loss /= self.training_args.gradient_accumulation_steps
-                # grads
                     
                 loss.backward()
                 
@@ -419,7 +407,6 @@ class HyperSteer(Model):
         # set tokenizer padding to left
         self.tokenizer.padding_side = "left"
         # depending on the model, we use different concept id columns
-        concept_id_col = "sae_id" if "sae" in self.__str__().lower() and not kwargs.get("disable_neuronpedia_max_act", False) else "concept_id"
         use_synergy = kwargs.get("use_synergy", False)
 
         # iterate rows in batch
@@ -476,7 +463,7 @@ class HyperSteer(Model):
             all_magnitudes += vector_magnitude
 
             self.ax._update_v(v)
-            
+                    
             _, generations = self.ax_model.generate(
                 inputs, 
                 unit_locations=None, intervene_on_prompt=True, 
@@ -493,6 +480,7 @@ class HyperSteer(Model):
                 self.tokenizer.decode(generation[input_length:], skip_special_tokens=True)
                 for generation, input_length in zip(generations, input_lengths)
             ]
+        
             all_generations += generated_texts
 
             # Calculate perplexity for each sequence
