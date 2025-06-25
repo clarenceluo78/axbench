@@ -21,8 +21,8 @@ train:
     HyperSteer:
       batch_size: 12
       gradient_accumulation_steps: 1
-      n_epochs: 3
-      lr: 0.001
+      n_epochs: 10
+      lr: 0.00008
       weight_decay: 0.00
       low_rank_dimension: 1
       intervention_positions: "all"
@@ -30,26 +30,12 @@ train:
       binarize_dataset: false
       train_on_negative: false
       exclude_bos: true
-      hypernet_name_or_path: "google/gemma-2-2b"
-      num_hidden_layers: 2
+      hypernet_name_or_path: "/nlp/scr/sjd24/hyperreft-2b"
+      num_hidden_layers: 4
       hypernet_initialize_from_pretrained: true
-    LsReFT:
-      batch_size: 6
-      gradient_accumulation_steps: 1
-      n_epochs: 3
-      lr: 0.01
-      weight_decay: 0.00
-      topk: 8
-      coeff_latent_l1_loss: 0.005
-      low_rank_dimension: 1
-      intervention_positions: "all"
-      intervention_type: "addition" # clamping
-      binarize_dataset: false
-      train_on_negative: true
-      exclude_bos: true
 inference:
   use_bf16: true
-  models: ["LsReFT", "PromptSteering", "HyperSteer"] 
+  models: ["HyperSteer"] 
   model_name: "google/gemma-2-2b-it"
   # latent related params
   output_length: 128
@@ -72,13 +58,12 @@ inference:
   temperature: 1.0
 
 evaluate:
-  models: ["PromptSteering", "HyperSteer"] 
+  models: ["HyperSteer"] 
   latent_evaluators: [
     "AUCROCEvaluator",
     "HardNegativeEvaluator",
   ]
   steering_evaluators: [
-    "PerplexityEvaluator", 
     "LMJudgeEvaluator",
   ]
   winrate_split_ratio: 0.5 # this is for steering only, we use a separate partition for factor selection.
