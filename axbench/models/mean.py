@@ -12,6 +12,7 @@ from typing import Dict, Optional, Sequence, Union, List, Any
 from torch.utils.data import DataLoader
 from .interventions import (
     AdditionIntervention,
+    AdditionStepIntervention,
     SubspaceIntervention,
     JumpReLUSAECollectIntervention
 )
@@ -57,7 +58,11 @@ class MeanEmbedding(Model):
         intervention_type = kwargs.get("intervention_type", "addition")
         if mode == "steering":
             if intervention_type == "addition":
-                ax = AdditionIntervention(
+                # ax = AdditionIntervention(
+                # embed_dim=self.model.config.hidden_size, 
+                    # low_rank_dimension=kwargs.get("low_rank_dimension", 1),
+                # )
+                ax = AdditionStepIntervention(
                 embed_dim=self.model.config.hidden_size, 
                     low_rank_dimension=kwargs.get("low_rank_dimension", 1),
                 )

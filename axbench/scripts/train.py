@@ -484,6 +484,10 @@ def main():
                 "preference_pairs": args.models[model_name].preference_pairs,
                 "steering_prompt_type": args.models[model_name].steering_prompt_type,
                 "substraction_type": args.models[model_name].substraction_type,
+                "concept_name": concept,
+                "lambda_pos": args.models[model_name].lambda_pos,
+                "lambda_sparse": args.models[model_name].lambda_sparse,
+                "mmd_sigma": args.models[model_name].mmd_sigma,
             }
             prepared_df = concept_df.copy()
             prepared_df = prepare_df(
@@ -606,17 +610,43 @@ def main():
             weight_files = [dump_dir / f"rank_{r}_{model_name}_weight.pt" for r in range(world_size)]
             bias_files = [dump_dir / f"rank_{r}_{model_name}_bias.pt" for r in range(world_size)]
 
+            # For MATSteer, also collect gate weight and bias files
+            gate_weight_files = []
+            gate_bias_files = []
+            if model_name == "MATSteer":
+                gate_weight_files = [dump_dir / f"rank_{r}_{model_name}_gate_weight.pt" for r in range(world_size)]
+                gate_bias_files = [dump_dir / f"rank_{r}_{model_name}_gate_bias.pt" for r in range(world_size)]
+
             # Check if files exist
             weight_files_existing = [f for f in weight_files if f.exists()]
             bias_files_existing = [f for f in bias_files if f.exists()]
+            
+            # For MATSteer, check gate files
+            gate_weight_files_existing = []
+            gate_bias_files_existing = []
+            if model_name == "MATSteer":
+                gate_weight_files_existing = [f for f in gate_weight_files if f.exists()]
+                gate_bias_files_existing = [f for f in gate_bias_files if f.exists()]
 
             if not weight_files_existing or not bias_files_existing:
                 logger.warning(f"No weight or bias files found for model {model_name}. Skipping.")
                 continue
 
+            # For MATSteer, also check gate files
+            if model_name == "MATSteer" and (not gate_weight_files_existing or not gate_bias_files_existing):
+                logger.warning(f"No gate weight or gate bias files found for model {model_name}. Skipping.")
+                continue
+
             # Load weights and biases
             weights = [torch.load(f) for f in weight_files_existing]
             biases = [torch.load(f) for f in bias_files_existing]
+
+            # For MATSteer, load gate weights and biases
+            gate_weights = []
+            gate_biases = []
+            if model_name == "MATSteer":
+                gate_weights = [torch.load(f) for f in gate_weight_files_existing]
+                gate_biases = [torch.load(f) for f in gate_bias_files_existing]
 
             # Concatenate weights and biases
             if isinstance(weights[0], dict):
@@ -636,6 +666,26 @@ def main():
             else:
                 merged_bias = torch.cat(biases, dim=0)
 
+            # For MATSteer, merge gate weights and biases
+            merged_gate_weight = None
+            merged_gate_bias = None
+            if model_name == "MATSteer":
+                if isinstance(gate_weights[0], dict):
+                    merged_gate_weight = {}
+                    for key in gate_weights[0].keys():
+                        gate_weight_tensors = [gw[key] for gw in gate_weights]
+                        merged_gate_weight[key] = torch.cat(gate_weight_tensors, dim=0)
+                else:
+                    merged_gate_weight = torch.cat(gate_weights, dim=0)
+
+                if isinstance(gate_biases[0], dict):
+                    merged_gate_bias = {}
+                    for key in gate_biases[0].keys():
+                        gate_bias_tensors = [gb[key] for gb in gate_biases]
+                        merged_gate_bias[key] = torch.cat(gate_bias_tensors, dim=0)
+                else:
+                    merged_gate_bias = torch.cat(gate_biases, dim=0)
+
             # Save merged weight and bias files
             weight_file = dump_dir / f"{model_name}_weight.pt"
             bias_file = dump_dir / f"{model_name}_bias.pt"
@@ -643,8 +693,20 @@ def main():
             torch.save(merged_bias, bias_file)
             logger.warning(f"Saved merged weights and biases for model {model_name}")
 
+            # For MATSteer, save merged gate files
+            if model_name == "MATSteer":
+                gate_weight_file = dump_dir / f"{model_name}_gate_weight.pt"
+                gate_bias_file = dump_dir / f"{model_name}_gate_bias.pt"
+                torch.save(merged_gate_weight, gate_weight_file)
+                torch.save(merged_gate_bias, gate_bias_file)
+                logger.warning(f"Saved merged gate weights and biases for model {model_name}")
+
             # Optionally delete per-rank files
-            for f in weight_files_existing + bias_files_existing:
+            files_to_delete = weight_files_existing + bias_files_existing
+            if model_name == "MATSteer":
+                files_to_delete += gate_weight_files_existing + gate_bias_files_existing
+            
+            for f in files_to_delete:
                 try:
                     f.unlink()
                     logger.warning(f"Deleted file {f.name}")

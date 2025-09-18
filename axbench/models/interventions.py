@@ -284,6 +284,98 @@ class AdditionIntervention(
         return output
     
 
+class GatedAdditionIntervention(
+    SourcelessIntervention,
+    TrainableIntervention,
+    DistributedRepresentationIntervention
+):
+    """Addition intervention with per-token sigmoid gate and concept vector."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs, keep_last_dim=True)
+        # Steering vector for each concept
+        self.proj = torch.nn.Linear(
+                self.embed_dim, kwargs["low_rank_dimension"], bias=True)
+        
+        # Gate parameters: w_c and b_c for G_c(a_i) = sigmoid(w_c * a_i + b_c)
+        self.gate_linear = torch.nn.Linear(self.embed_dim, kwargs["low_rank_dimension"], bias=True)
+
+    def forward(self, base, source=None, subspaces=None):
+        # base shape: [batch_size, seq_len, embed_dim]
+        # Similar to ProbeIntervention pattern
+        
+        v = []
+        gate_weights = []
+        gate_biases = []
+        
+        if "subspaces" in subspaces:
+            for subspace in subspaces["subspaces"]:
+                v += [self.proj.weight[subspace]]
+                gate_weights += [self.gate_linear.weight[subspace]]
+                gate_biases += [self.gate_linear.bias[subspace]]
+        else:
+            for i in range(base.shape[0]):
+                v += [self.proj.weight[0]]
+                gate_weights += [self.gate_linear.weight[0]]
+                gate_biases += [self.gate_linear.bias[0]]
+        
+        v = torch.stack(v, dim=0)  # [batch_size, embed_dim]
+        gate_w = torch.stack(gate_weights, dim=0)  # [batch_size, embed_dim]
+        gate_b = torch.stack(gate_biases, dim=0)  # [batch_size]
+        
+        # Get gate values: G_c(a_i) = sigmoid(w_c * a_i + b_c)
+        gate_values = torch.sigmoid(
+            torch.sum(base * gate_w.unsqueeze(1), dim=-1) + gate_b.unsqueeze(1)
+        )  # [batch_size, seq_len]
+        
+        # Apply scaling by max_act and mag if available
+        if "max_act" in subspaces and "mag" in subspaces:
+            scaling = subspaces["max_act"].unsqueeze(-1) * subspaces["mag"].unsqueeze(-1)  # [batch_size, 1]
+            steering_vec = scaling * v  # [batch_size, embed_dim]
+        else:
+            steering_vec = v  # [batch_size, embed_dim]
+        
+        # Apply gated addition: a_i + G_c(a_i) * theta_c
+        steered = base + gate_values.unsqueeze(-1) * steering_vec.unsqueeze(1)  # [batch_size, seq_len, embed_dim]
+        
+        # Norm preservation: scale to maintain original norm
+        base_norm = torch.norm(base, dim=-1, keepdim=True)
+        steered_norm = torch.norm(steered, dim=-1, keepdim=True)
+        output = steered * (base_norm / (steered_norm + 1e-8))
+        
+        return output
+
+class AdditionStepIntervention(
+    SourcelessIntervention,
+    TrainableIntervention, 
+    DistributedRepresentationIntervention
+):
+    def __init__(self, **kwargs):
+        # Note that we initialise these to zeros because we're loading in pre-trained weights.
+        # If you want to train your own SAEs then we recommend using blah
+        super().__init__(**kwargs, keep_last_dim=True)
+        self.proj = torch.nn.Linear(
+                self.embed_dim, kwargs["low_rank_dimension"], bias=True)
+        self.called_counter = 0
+
+    def forward(self, base, source=None, subspaces=None):
+        self.called_counter += 1
+        if self.called_counter == 0 or (1 <= self.called_counter <= 10):
+            return base  # No intervention for steps 0 through 10
+        else:
+            # use subspaces["idx"] to select the correct weight vector
+            steering_vec = subspaces["max_act"].unsqueeze(dim=-1) * \
+                subspaces["mag"].unsqueeze(dim=-1) * self.proj.weight[subspaces["idx"]]
+            output = base + steering_vec.unsqueeze(dim=1)
+            
+            # Renormalize to keep L2 norm unchanged (directional edit only)
+            original_norm = torch.norm(base, p=2, dim=-1, keepdim=True)
+            modified_norm = torch.norm(output, p=2, dim=-1, keepdim=True)
+            output = output * (original_norm / (modified_norm + 1e-8))
+            
+            return output
+
+
 class AdditionSuppressionIntervention(
     SourcelessIntervention,
     TrainableIntervention, 
@@ -1023,4 +1115,3 @@ class PreferenceNodireftIntervention(
             output=self.dropout(output.to(base.dtype)),
             latent=[diff]
         )
-

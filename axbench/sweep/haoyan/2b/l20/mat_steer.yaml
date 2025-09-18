@@ -1,0 +1,73 @@
+generate:
+  lm_model: "gpt-4o-mini"
+  input_length: 32
+  output_length: 32
+  num_of_examples: 72
+  concept_path: "axbench/data/gemma-2-2b_20-gemmascope-res-16k.json"
+  max_concepts: 20
+  master_data_dir: "axbench/data"
+  dataset_category: "instruction"
+  lm_use_cache: false
+  seed: 42
+  keep_orig_axbench_format: true
+
+train:
+  model_name: "google/gemma-2-2b-it"
+  layer: 20
+  component: "res"
+  seed: 42
+  use_bf16: true
+  output_length: 128
+  use_wandb: true
+  wandb_project: "concept10-l20"
+  wandb_name: "mat_steer"
+  models:
+    MATSteer:
+      batch_size: 12
+      gradient_accumulation_steps: 4
+      n_epochs: 10
+      lr: 0.005
+      weight_decay: 0.00
+      binarize_dataset: true
+      low_rank_dimension: 1
+      lambda_pos: 0.8
+      lambda_sparse: 0.0
+      mmd_sigma: 2.0
+      intervention_type: "addition"
+
+inference:
+  use_bf16: true
+  models: ["MATSteer"]
+  model_name: "google/gemma-2-2b-it"
+  output_length: 128
+  latent_num_of_examples: 36
+  latent_batch_size: 16
+  steering_intervention_type: "addition"
+  steering_model_name: "google/gemma-2-2b-it"
+  steering_datasets: ["AlpacaEval"]
+  steering_batch_size: 100
+  steering_output_length: 128
+  steering_layers: [20]
+  steering_num_of_examples: 10
+  # steering_factors: [0.2, 0.6, 1.0, 1.4, 2.0, 3.0, 4.0, 5.0]
+  steering_factors: [1]
+  master_data_dir: "axbench/data"
+  seed: 42
+  lm_model: "gpt-4o-mini"
+  temperature: 1.0
+
+evaluate:
+  models: ["MATSteer"]
+  latent_evaluators: [
+    "AUCROCEvaluator",
+    "HardNegativeEvaluator",
+  ]
+  steering_evaluators: [
+    "LMJudgeEvaluator",
+  ]
+  winrate_split_ratio: 0.5
+  num_of_workers: 32
+  lm_model: "gpt-4o-mini"
+  run_winrate: false
+  winrate_baseline: "PromptSteering"
+  master_data_dir: "axbench/data"

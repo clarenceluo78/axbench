@@ -40,7 +40,7 @@ CONFIG_FILE = "config.json"
 METADATA_FILE = "metadata.jsonl"
 STEERING_WITH_SHARED_MODELS = {"HyperSteer"}
 STEERING_EXCLUDE_MODELS = {"IntegratedGradients", "InputXGradients", "PromptDetection", "BoW"}
-LATENT_EXCLUDE_MODELS = {"PromptSteering", "PromptBaseline", "DiReFT", "LoReFT", "LoRA", "SFT", "HyperSteer"}
+LATENT_EXCLUDE_MODELS = {"PromptSteering", "PromptBaseline", "DiReFT", "LoReFT", "LoRA", "SFT", "HyperSteer", "MATSteer"}
 LATENT_PROMPT_PREFIX = "Generate a random sentence."
 
 def load_config(config_path):
@@ -212,6 +212,7 @@ def infer_steering(args, rank, world_size, device, logger, training_args, genera
     train_dir = args.train_dir
     dump_dir = args.dump_dir
     overwrite_inference_dump_dir = Path(args.overwrite_inference_dump_dir) if args.overwrite_inference_dump_dir is not None else Path(dump_dir) / "inference"
+    os.makedirs(overwrite_inference_dump_dir, exist_ok=True)
     num_of_examples = args.steering_num_of_examples
     config = load_config(train_dir)
     metadata = load_metadata_flatten(data_dir)
@@ -531,6 +532,7 @@ def infer_latent(args, rank, world_size, device, logger, training_args, generate
     data_dir = args.data_dir
     train_dir = args.train_dir
     dump_dir = Path(args.dump_dir) / "inference"
+    os.makedirs(dump_dir, exist_ok=True)
     num_of_examples = args.latent_num_of_examples
     config = load_config(train_dir)
     metadata = load_metadata_flatten(data_dir)
@@ -1146,4 +1148,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
